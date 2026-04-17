@@ -68,6 +68,7 @@
     "@biomejs/biome": "^2.0.0",
     "@changesets/changelog-github": "^0.6.0",
     "@changesets/cli": "^2.30.0",
+    "@types/node": "^25.6.0",
     "publint": "^0.3.0",
     "tsdown": "^0.21.8",
     "tsx": "^4.21.0",
