@@ -1,0 +1,99 @@
+{
+  "name": "@seike460/minamo",
+  "version": "0.1.0",
+  "description": "Type-safe CQRS+ES for AWS Serverless",
+  "keywords": [
+    "cqrs",
+    "event-sourcing",
+    "event-store",
+    "dynamodb",
+    "aws",
+    "serverless",
+    "lambda",
+    "typescript",
+    "esm"
+  ],
+  "author": {
+    "name": "Shiro Seike",
+    "url": "https://github.com/seike460"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seike460/minamo.git"
+  },
+  "homepage": "https://github.com/seike460/minamo#readme",
+  "bugs": {
+    "url": "https://github.com/seike460/minamo/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "prepack": "pnpm run build",
+    "build": "tsdown && tsc --declaration --emitDeclarationOnly --outDir dist",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "ci": "biome ci .",
+    "type-check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "check-exports": "attw --pack . --profile esm-only && publint .",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm run build && changeset publish",
+    "docs": "typedoc",
+    "docs:watch": "typedoc --watch"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0",
+    "@biomejs/biome": "^2.0.0",
+    "@changesets/changelog-github": "^0.6.0",
+    "@changesets/cli": "^2.30.0",
+    "publint": "^0.3.0",
+    "tsdown": "^0.21.8",
+    "tsx": "^4.21.0",
+    "typedoc": "^0.28.19",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-dynamodb": {
+      "optional": true
+    },
+    "@aws-sdk/lib-dynamodb": {
+      "optional": true
+    },
+    "@aws-sdk/util-dynamodb": {
+      "optional": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

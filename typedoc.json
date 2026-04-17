@@ -1,0 +1,27 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "entryPointStrategy": "resolve",
+  "out": "docs/api",
+  "tsconfig": "tsconfig.json",
+  "readme": "none",
+  "includeVersion": true,
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "githubPages": false,
+  "navigationLinks": {
+    "Repository": "https://github.com/seike460/minamo",
+    "Concept": "https://github.com/seike460/minamo/blob/main/docs/concept.md"
+  },
+  "hideGenerator": true,
+  "gitRevision": "main",
+  "sourceLinkTemplate": "https://github.com/seike460/minamo/blob/{gitRevision}/{path}#L{line}",
+  "intentionallyNotExported": ["IsTuple"],
+  "treatWarningsAsErrors": true,
+  "validation": {
+    "notDocumented": true,
+    "invalidLink": true,
+    "notExported": true
+  }
+}

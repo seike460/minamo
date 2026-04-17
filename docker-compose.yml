@@ -1,0 +1,7 @@
+services:
+  dynamodb-local:
+    # CI (.github/workflows/ci.yml) の pin と合わせる。upgrade は deliberate に
+    image: amazon/dynamodb-local:2.5.4
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
