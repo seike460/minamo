@@ -62,8 +62,8 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.0",
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.1031.0",
+    "@aws-sdk/lib-dynamodb": "^3.1031.0",
     "@aws-sdk/util-dynamodb": "^3.0.0",
     "@biomejs/biome": "^2.0.0",
     "@changesets/changelog-github": "^0.6.0",
@@ -76,8 +76,8 @@
     "vitest": "^3.1.0"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.1031.0",
+    "@aws-sdk/lib-dynamodb": "^3.1031.0",
     "@aws-sdk/util-dynamodb": "^3.0.0"
   },
   "peerDependenciesMeta": {
