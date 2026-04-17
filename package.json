@@ -1,6 +1,6 @@
 {
   "name": "@seike460/minamo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Type-safe CQRS+ES for AWS Serverless",
   "keywords": [
     "cqrs",
