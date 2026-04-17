@@ -1,0 +1,42 @@
+name: Task
+description: 実装・テスト・ドキュメント・運用の単一タスクを登録する
+title: "<Prefix>-<Number>: <短い日本語タイトル>"
+labels:
+  - "type: feat"
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: なぜこのタスクが必要か。背景 (design doc / DEC / 過去の PR 等) への link を含める
+      placeholder: |
+        <例> U4 §8.1 の Contract Tests を U5 InMemoryEventStore 対象で実行し、§1 痛み C への構造的回答を固める。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: 「何をもって closed か」を checkbox で列挙する。design doc の当該 section ID を付ける
+      placeholder: |
+        - [ ] `test/in-memory.test.ts` で `registerEventStoreContract` を呼び出す
+        - [ ] CT-InMem-01〜07 の 7 ケースを追加
+        - [ ] `pnpm run test` で green
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocked by / Blocks を明示する。unit 単位で依存グラフを書けるようにする
+      placeholder: |
+        - Blocked by: C-08, C-09
+        - Blocks: (なし)
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: canonical doc / design doc / DEC 等の link。行番号まで引ける場合は含める
+      placeholder: |
+        - docs/design/v0.1.0/U5-in-memory-event-store.md §8
+        - concept.md §1 痛み C

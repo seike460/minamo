@@ -1,0 +1,3 @@
+# Global default: sole maintainer is assigned to every review.
+# GitHub routes review requests automatically based on this file.
+* @seike460
