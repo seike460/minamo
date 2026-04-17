@@ -1,5 +1,11 @@
 # minamo
 
+## 0.1.1
+
+### Patch Changes
+
+- [`c0589e6`](https://github.com/seike460/minamo/commit/c0589e685ee2cc13b23869ac0d493d8666c92c6d) Thanks [@seike460](https://github.com/seike460)! - README を英訳し、日本語版を `README.ja.md` に分離。GitHub / npm 上で English / 日本語 両方の導線を提供。
+
 ## 0.1.0
 
 ### Minor Changes
