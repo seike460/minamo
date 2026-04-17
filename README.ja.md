@@ -140,11 +140,21 @@ await executeCommand({ config: counter, store, handler, aggregateId: "counter-1"
 
 仕様は [`docs/concept.md` §5.9](docs/concept.md#59-optional-input-validation-standard-schema-v1) / DEC-015 を参照。
 
+## 設計の境界
+
+minamo が意図的に **やらないこと** と、その理由。詳細は [`docs/concept.md`](docs/concept.md) §4 "設計の姿勢" / §6 Non-Goals / §11 Decisions を参照。
+
+- **Projection 層は consumer 責務** (DEC-013 / DEC-014)。`EventStore.append` / `EventStore.load` は write 側の契約のみ。Stream → Read Model 配信、poison pill 隔離、append 時 projection middleware は scope 外。local / test runtime で同期 projection が欲しい場合は [`examples/projected-event-store/`](examples/projected-event-store/) の Decorator recipe を、production では DynamoDB Streams + `parseStreamRecord` ([`examples/multi-aggregate-projection/`](examples/multi-aggregate-projection/)) を使う。
+- **Event type の命名規約は強制しない** (DEC-009)。minamo は event type 文字列の registry 管理も validation もしない。共有テーブル運用では Aggregate プレフィックス (`Counter.Incremented` / `Wallet.Credited`) を規約として採用するが、ライブラリはそれを enforce しない。
+- **Aggregate state は plain data で framework object ではない** (DEC-011)。state は structured-cloneable かつ DynamoDB-marshallable である必要がある。`evolve` は spread / concat / filter で新しい値を返す。immer 等の draft ライブラリは `evolve` の中で自由に使えるが、依存には加えず state 契約は plain を維持する。
+- **Future considerations** (v0.2.x、v0.1.x ではやらない): Aggregate 横断 `EventStoreTable` facade と、`createCommandRunner` の第一級 API 化は [`docs/roadmap.md`](docs/roadmap.md) に記録。v0.1.x は単一 Aggregate の `EventStore<TMap>` 契約と object-params の `executeCommand` 面を維持する。
+
 ## Design
 
 - [`docs/concept.md`](docs/concept.md) — 設計思想と公開 API の canonical 仕様 (§5 API Design / §11 Decisions)
 - [`docs/design/v0.1.0/`](docs/design/v0.1.0/) — unit 単位の detailed design (U1〜U9)
 - [`docs/design/v0.1.0.md`](docs/design/v0.1.0.md) — implementation order と module structure
+- [`docs/roadmap.md`](docs/roadmap.md) — v0.2.x 以降に持ち越した検討項目
 - [`docs/pitfalls.ja.md`](docs/pitfalls.ja.md) — よくあるハマりどころ (production 利用からの学び)
 - API reference — typedoc で自動生成、GitHub Pages 配信
 
@@ -154,6 +164,7 @@ README 内のコードと同期した実行可能な example を [`examples/`](e
 
 - [`examples/counter/`](examples/counter/) — InMemory / DynamoEventStore の最小構成 (concept.md §4)
 - [`examples/multi-aggregate-projection/`](examples/multi-aggregate-projection/) — 複数 Aggregate を 1 Lambda で `parseStreamRecord` + `eventNamesOf` でルーティング (DEC-009 + DEC-013)
+- [`examples/projected-event-store/`](examples/projected-event-store/) — append → projection を同期結合する consumer Decorator と `createCommandRunner` factory。本体 API に hook を足さずに projection を繋ぐパターン (DEC-013 / DEC-014)
 - [`examples/dynamodb-local/`](examples/dynamodb-local/) — Docker 上の DynamoDB Local で `DynamoEventStore` を E2E 実行 (append / load / rehydrate / `ConcurrencyError`)
 
 ## License
