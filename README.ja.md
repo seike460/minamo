@@ -145,6 +145,7 @@ await executeCommand({ config: counter, store, handler, aggregateId: "counter-1"
 - [`docs/concept.md`](docs/concept.md) — 設計思想と公開 API の canonical 仕様 (§5 API Design / §11 Decisions)
 - [`docs/design/v0.1.0/`](docs/design/v0.1.0/) — unit 単位の detailed design (U1〜U9)
 - [`docs/design/v0.1.0.md`](docs/design/v0.1.0.md) — implementation order と module structure
+- [`docs/pitfalls.ja.md`](docs/pitfalls.ja.md) — よくあるハマりどころ (production 利用からの学び)
 - API reference — typedoc で自動生成、GitHub Pages 配信
 
 ## License
