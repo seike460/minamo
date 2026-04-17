@@ -48,6 +48,8 @@ TypeScript infers `{ signedAt?: undefined }` on the fly during tuple narrowing, 
 
 `EventStore.append` / `EventStore.load` are under minamo's contract. **Stream → Read Model delivery is out of scope** (see `concept.md` §6 Non-Goals).
 
+A runnable routing pattern (multiple Aggregates through one Lambda) is at [`examples/multi-aggregate-projection/`](../examples/multi-aggregate-projection/).
+
 For local development or testing where you want projections to fire synchronously, wrap `EventStore` yourself:
 
 ```ts

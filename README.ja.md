@@ -148,6 +148,14 @@ await executeCommand({ config: counter, store, handler, aggregateId: "counter-1"
 - [`docs/pitfalls.ja.md`](docs/pitfalls.ja.md) — よくあるハマりどころ (production 利用からの学び)
 - API reference — typedoc で自動生成、GitHub Pages 配信
 
+## Examples
+
+README 内のコードと同期した実行可能な example を [`examples/`](examples/) に配置しています:
+
+- [`examples/counter/`](examples/counter/) — InMemory / DynamoEventStore の最小構成 (concept.md §4)
+- [`examples/multi-aggregate-projection/`](examples/multi-aggregate-projection/) — 複数 Aggregate を 1 Lambda で `parseStreamRecord` + `eventNamesOf` でルーティング (DEC-009 + DEC-013)
+- [`examples/dynamodb-local/`](examples/dynamodb-local/) — Docker 上の DynamoDB Local で `DynamoEventStore` を E2E 実行 (append / load / rehydrate / `ConcurrencyError`)
+
 ## License
 
 [MIT](LICENSE) © Shiro Seike

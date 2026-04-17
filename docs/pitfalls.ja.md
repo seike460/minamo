@@ -48,6 +48,8 @@ TypeScript は tuple narrowing の過程で `{ signedAt?: undefined }` を派生
 
 `EventStore.append` / `EventStore.load` は minamo の契約下にあるが、**Stream → Read Model の配信は Non-Goals** (`concept.md` §6)。
 
+複数 Aggregate を 1 Lambda で route する実行可能なパターンは [`examples/multi-aggregate-projection/`](../examples/multi-aggregate-projection/) を参照。
+
 ローカル開発やテストで projection を同期に発火させたい場合は、自前で `EventStore` をラップする:
 
 ```ts
