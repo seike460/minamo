@@ -1751,10 +1751,11 @@ minamo は **1 人メンテ**（seike460）のプロジェクトである。
 **SemVer 準拠。**
 
 - **0.x:** API を磨くフェーズ。breaking change は許容される。ただし 0.x でも breaking change の前に **1 リリース deprecation 警告** を出す（行動指針: Compatibility is a Feature）
-- **1.0.0 の条件:** 以下を全て満たした場合
-  - §10 Open Questions の v1 スコープ内項目が全て解決済み
-  - 実プロジェクトでの dog-fooding 実績がある
-  - 公開 API が 3 マイナーリリース以上安定している（breaking change なし）
+- **1.0.0 の条件:** 以下を全て満たした場合（詳細・進捗は [`docs/roadmap-v1.md`](roadmap-v1.md)）
+  - §10 Open Questions の v1 スコープ内項目が全て解決済み（OQ-1 Snapshot / OQ-2 upcasting は v0.4 / v0.3 で決着）
+  - 実プロジェクトでの dog-fooding 実績がある。加えて **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（CxO 診断 2026-05-30 で追加）
+  - **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。CxO 診断で追加）
+  - 公開 API が 3 マイナーリリース以上安定している。ここで「安定」とは **既存 surface への breaking change なし**を指し、additive な追加（v0.2/v0.3/v0.4 の新 API）は安定性と矛盾しない（DEC-024）。API Extractor gate で surface 差分を機械的に監視する
 - **1.x:** deprecation → 次の minor release で警告 → その次の minor release で削除。migration guide を必ず添付する
 - **2.x:** 現時点では計画しない
 

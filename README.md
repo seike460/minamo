@@ -180,6 +180,10 @@ Runnable examples under [`examples/`](examples/) mirror the code in this README 
 - [`examples/multi-aggregate-projection/`](examples/multi-aggregate-projection/) — Route N Aggregates through one Lambda with `parseStreamRecord` + `eventNamesOf` (DEC-009 + DEC-013)
 - [`examples/projected-event-store/`](examples/projected-event-store/) — Consumer Decorator for sync projection and a `createCommandRunner` factory. Shows how to handle append → projection without adding hooks to the core API (DEC-013 / DEC-014)
 - [`examples/dynamodb-local/`](examples/dynamodb-local/) — End-to-end `DynamoEventStore` on Docker DynamoDB Local (append / load / rehydrate / `ConcurrencyError`)
+- [`examples/upcasting/`](examples/upcasting/) — Schema evolution via `AggregateConfig.upcast` (consumer-owned transform, DEC-020)
+- [`examples/snapshot/`](examples/snapshot/) — `SnapshotStore` + `snapshotPolicy` to shorten rehydration, with `ExecuteObserver` showing the replay-count reduction (DEC-019 / DEC-021)
+
+> The path from the current v0.1.x to v1.0.0 is tracked in [`docs/roadmap-v1.md`](docs/roadmap-v1.md).
 
 ## License
 
