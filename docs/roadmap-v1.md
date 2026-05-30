@@ -1,6 +1,6 @@
 # Roadmap to v1.0.0
 
-minamo を v1.0.0 に到達させるためのシーケンス計画。本書は 16 CxO ラウンドテーブル診断（2026-05-30）と、その結果採られた **「信頼性のためのスコープ拡大」** 方針に基づく。
+minamo を v1.0.0 に到達させるためのシーケンス計画。本書は 2026-05-30 の v1 設計レビューと、その結果採られた **「信頼性のためのスコープ拡大」** 方針に基づく。
 
 > 軽量キューである [`docs/roadmap.md`](roadmap.md) が「個別の検討項目」を貯める場所であるのに対し、本書は **v1 到達という到達点に向けた版ごとのシーケンスと卒業条件**を定義する。確定した設計判断は `docs/concept.md` §11（DEC-018〜024）と `docs/design/v0.2.0*` に移送される。
 
@@ -15,16 +15,16 @@ minamo を v1.0.0 に到達させるためのシーケンス計画。本書は 1
 
 **結論:** 宣言されたスコープ（CQRS+ES の Write 側）に対しては機能完成している。v1 を阻むのは「壊れた箇所」ではなく、①人・普及・継続性の未成熟、②ES 実務に対する機能不足（upcasting / Snapshot 欠落）の 2 点。
 
-## 2. CxO 診断サマリ（平均健全度 ≈76 / 100）
+## 2. 現状評価（2026-05-30）
 
-| CxO | 健全度 | 最も鋭い指摘 |
-|---|---|---|
-| CEO 82 / CTO 92 / CTeO 90 / CIO 88 | 高 | 設計の芯・知識資産・テストは v1 級 |
-| CISO 85 / CXO 84 / CFO 78 / COO 80 / CLO 80 | 中高 | supply chain・DX は良好。保守時間予算と運用並走が懸念 |
-| CPO 76 / CRO 75 / CDO 72 / CSO 70 | 中 | frozen scope が ES 実務に機能不足（upcasting/Snapshot）。採用非推奨条件が長い |
-| CMO 62 / CCO 60 / CHRO 55 | **低** | **人・普及・継続性**: bus factor=1、コミュニティ未形成、ポジショニングが埋もれている |
+v1 を阻むのは「壊れた箇所」ではなく、次の 2 つの未成熟である:
 
-**横断テーマ:** コードは v1 級だが、プロジェクトとしての v1 はエコシステム面（採用実績・継続性・普及）が未成熟。
+- **人・普及・継続性（最も重い）** — bus factor=1、コミュニティ未形成、ポジショニングが市場で埋もれている。
+- **ES 実務に対する機能不足** — 長寿命 Aggregate / 頻繁なスキーマ変更に対する upcasting・Snapshot の欠落。
+
+一方、設計の芯・知識資産（DEC / design docs）・テスト（Contract Tests・約 3:1 の test 比）は既に v1 水準にある。supply chain（provenance / OIDC）と DX も良好で、残る懸念は保守時間予算と運用並走の持続性。
+
+**横断テーマ:** コードは v1 級だが、プロジェクトとしての v1（採用実績・継続性・普及）が未成熟。
 
 ## 3. v1 の定義（拡大姿勢）
 
@@ -68,26 +68,26 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 - [ ] **v0.2.0 で v1 機能を一括導入し、v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積む**
 - [ ] API Extractor gate が CI で稼働し、surface 差分が常にレビューされる
 - [ ] **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（dog-fooding 1 件のみでは不十分）
-- [ ] **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。CHRO 卒業条件）
+- [ ] **co-maintainer ≥1 名の獲得**（bus factor=1 の解消）
 
 > **コードと 1.0.0 タグの区別:** **v0.2.0 で v1 の全機能が実装される**。ただし 1.0.0 タグは上記の非コード条件（3 マイナー安定 / 外部採用 / co-maintainer）の充足後に押す。機能実装の完了 ≠ 1.0.0 リリース。
 
-## 6. CxO 議論の裁定と少数意見
+## 6. 検討した対立軸と留保事項
 
-**裁定済みの対立軸:**
+**解決済みの対立軸:**
 
-| 対立軸 | 裁定 |
+| 対立軸 | 解決方針 |
 |---|---|
 | thin 死守 vs 信頼性のため拡大 | upcasting は consumer 所有の hook、Snapshot は別 interface とし、**実装エンジン化を避ける**ことで thin 原則と両立 |
 | v1 基準の自己矛盾 | additive 解釈で明確化（DEC-024） |
 | bus factor vs 機能速度 | 全項目に「1 人で永久保守できるか」ゲート。co-maintainer 獲得を卒業条件に格上げ |
 | 採用実績 | 外部採用 / 公開ケーススタディを卒業条件に追加 |
 
-**記録された少数意見（dissent）:**
+**留保事項（記録）:**
 
-- **CFO / CTO:** `createEventStoreTable` facade は per-Aggregate `TMap` narrowing を隠すリスク（roadmap.md 既出）。型テスト（`expectTypeOf`）で narrowing 保持を gate しない限り採用に反対。→ Phase 1 で型テストを必須化することで条件付き合意。
-- **CTO:** Snapshot は実運用で rehydration コスト閾値超過が実測されるまで YAGNI。→ minamo は **機構（policy を consumer が指定）のみ**提供し、閾値を強制しない形で折衷。
-- **CISO:** ロードマップが何であれ、1 人メンテのセキュリティ応答はエンタープライズ SLA を満たせない。これは「直す」ものではなく「声高に明示し続ける」もの。→ SECURITY.md / §12 の SLA なし明記を維持。
+- **facade の型 narrowing:** `createEventStoreTable` は per-Aggregate `TMap` narrowing を隠すリスク（roadmap.md 既出）。型テスト（`expectTypeOf`）で narrowing 保持を gate しない限り採用に値しない。→ 型テストを必須化することで対応。
+- **Snapshot の YAGNI 懸念:** 実運用で rehydration コスト閾値超過が実測されるまでは YAGNI との見方。→ minamo は **機構（policy を consumer が指定）のみ**提供し、閾値を強制しない形で折衷。
+- **1 人メンテのセキュリティ応答:** ロードマップが何であれ、1 人メンテ体制ではエンタープライズ SLA を満たせない。これは「直す」ものではなく「明示し続ける」もの。→ SECURITY.md / §12 の SLA なし明記を維持。
 
 ## 7. post-v1（据え置き）
 
@@ -97,4 +97,4 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 
 ---
 
-Last reviewed: 2026-05-30（CxO ラウンドテーブル診断に基づき新規作成）。
+Last reviewed: 2026-05-30（v1 設計レビューに基づき新規作成）。

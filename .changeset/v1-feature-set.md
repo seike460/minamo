@@ -2,7 +2,7 @@
 "@seike460/minamo": minor
 ---
 
-v1 に向けた機能拡充（CxO ラウンドテーブル診断 2026-05-30 に基づくスコープ拡大。docs/roadmap-v1.md / DEC-018〜024）。
+v1 に向けた機能拡充（2026-05-30 の v1 設計レビューに基づくスコープ拡大。docs/roadmap-v1.md / DEC-018〜025）。
 
 すべて additive（既存 surface への breaking change なし）。retry 枯渇時の throw 型のみ変更（1 リリース deprecation を経た DEC-022）。
 

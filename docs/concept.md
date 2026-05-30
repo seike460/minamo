@@ -1176,7 +1176,7 @@ export declare function createEventStoreTable(
 
 ### v1 in-scope に昇格（DEC-018）
 
-以下は当初 v1 スコープ外（将来検討）だったが、16 CxO ラウンドテーブル診断（2026-05-30）の結果、**ES 実務で普遍的に必要となるため v1 in-scope に昇格**した。シーケンスと卒業条件は [`docs/roadmap-v1.md`](roadmap-v1.md)、詳細設計は DEC-018〜020 を参照。
+以下は当初 v1 スコープ外（将来検討）だったが、2026-05-30 の v1 設計レビューの結果、**ES 実務で普遍的に必要となるため v1 in-scope に昇格**した。シーケンスと卒業条件は [`docs/roadmap-v1.md`](roadmap-v1.md)、詳細設計は DEC-018〜020 を参照。
 
 | 項目 | v1 での提供形態 | 関連 DEC |
 |------|---------------|---------|
@@ -1323,10 +1323,10 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 
 ### DEC-018: v1 スコープを「信頼性のため拡大」する — Snapshot / upcasting を in-scope に昇格
 
-- **指摘元:** 16 CxO ラウンドテーブル診断（2026-05-30）。CPO / CRO / CDO / CSO が「upcaster ゼロ・Snapshot ゼロの ES ライブラリは採用非推奨条件が長すぎ、実務で v1 と呼べない」と指摘
+- **指摘元:** 2026-05-30 の v1 設計レビュー。「upcaster ゼロ・Snapshot ゼロの ES ライブラリは採用非推奨条件が長すぎ、実務で v1 と呼べない」という指摘
 - **判断:** v1 のスコープを拡大し、**イベントスキーマ進化（upcasting）と Snapshot を v1 in-scope に昇格**する。永久スコープ外（Read Model 管理 / Saga / CDK / EventBridge / 複数 DB）と設計姿勢（thin / strict / framework-free / AWS 非ラップ）は不変
 - **理由:** スキーマ進化と長寿命 Aggregate は ES 実務で普遍的に発生する。これらを欠いたまま v1 を凍結すると「採用非推奨条件」（§8）が実質的な利用障壁になる。ただし拡大は **hook / interface に留め実装エンジン化を避ける**ことで thin 原則と 1 人メンテの保守可能性を守る（DEC-019 / DEC-020）
-- **棄却した代替案:** (a) thin 死守で Snapshot/upcasting を post-v1 据え置き → ES 実務の壁が残り CPO/CRO の懸念が解消しない (b) @ocoda のように Read 側まで包括する → DEC-013/014 と矛盾し保守不能。CTO dissent（Snapshot は実測まで YAGNI）は「機構のみ提供・閾値を強制しない」（DEC-019）で折衷
+- **棄却した代替案:** (a) thin 死守で Snapshot/upcasting を post-v1 据え置き → ES 実務の壁が残り実務適用の懸念が解消しない (b) @ocoda のように Read 側まで包括する → DEC-013/014 と矛盾し保守不能。Snapshot を実測まで YAGNI とする留保には「機構のみ提供・閾値を強制しない」（DEC-019）で折衷
 
 ### DEC-019: Snapshot は EventStore と独立した SnapshotStore interface として提供する
 
@@ -1348,7 +1348,7 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 
 ### DEC-022: retry 枯渇時は RetryExhaustedError でラップする（v0.1.0 の生 ConcurrencyError throw を supersede）
 
-- **指摘元:** CTeO / CRO 診断。design doc `00-constraints-and-risks.md` R13 が `RetryExhaustedError { cause, attempts }` を設計していたが、v0.1.0 実装は concept.md §5.6 通り生の `ConcurrencyError` を throw し、試行回数情報を喪失していた
+- **指摘元:** 設計レビュー。design doc `00-constraints-and-risks.md` R13 が `RetryExhaustedError { cause, attempts }` を設計していたが、v0.1.0 実装は concept.md §5.6 通り生の `ConcurrencyError` を throw し、試行回数情報を喪失していた
 - **判断:** retry 枯渇時に `RetryExhaustedError`（`attempts` = 総試行回数、`cause` = 最後の ConcurrencyError）を throw する。0.x の breaking change だが §12 方針通り 1 リリース deprecation を経る
 - **理由:** 運用時に「1 回の衝突」と「枯渇」を区別できず、retry exhaustion の監視（§8 推奨）ができなかった。`cause`（ES2022）で根本原因を保持しつつ、`attempts` で枯渇を明示する。R13 設計を実装に一致させる
 - **棄却した代替案:** (a) 生 ConcurrencyError のまま維持 → 試行回数を失い observability が成立しない (b) ConcurrencyError に attempts を後付け → 「1 回の衝突」と「枯渇」が同型になり区別不能
@@ -1356,13 +1356,13 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 ### DEC-023: createCommandRunner / createEventStoreTable を first-party 化する
 
 - **判断:** `examples/projected-event-store/command-runner.ts` の recipe を `createCommandRunner` として、roadmap.md 検討中だった facade を `createEventStoreTable` として first-party 化する。facade の `.for<TMap>()` は heterogeneous union ではなく単一 Aggregate の `DynamoEventStore<TMap>` を返し、per-Aggregate `TMap` narrowing を保持する
-- **理由:** 11 Aggregate を 1 テーブルで運用する production 利用で store 構築の boilerplate が DX の崖になっている（CXO/CPO 診断）。いずれも既存 API の薄いラッパーで公開契約を変えない
-- **棄却した代替案:** (a) recipe のまま据え置き → DX の崖が残る (b) facade が `EventStore<Union>` を返す → 単一ストリーム不変条件（rehydrate が依存）を破壊する。CFO/CTO dissent に応え、`expectTypeOf` 型テストで narrowing 保持を gate する
+- **理由:** 11 Aggregate を 1 テーブルで運用する production 利用で store 構築の boilerplate が DX の崖になっている。いずれも既存 API の薄いラッパーで公開契約を変えない
+- **棄却した代替案:** (a) recipe のまま据え置き → DX の崖が残る (b) facade が `EventStore<Union>` を返す → 単一ストリーム不変条件（rehydrate が依存）を破壊する。型 narrowing を隠すリスクへの留保に応え、`expectTypeOf` 型テストで narrowing 保持を gate する
 
 ### DEC-024: API Extractor gate 導入と「3 マイナー安定」の additive 解釈
 
 - **判断:** `@microsoft/api-extractor` で公開 surface のレポート（`etc/minamo.api.md`）を生成・commit し、CI で差分を検出する gate を導入する。§12 の「公開 API が 3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」**（additive な追加は安定性と矛盾しない）と解釈する
-- **理由:** §12 の安定性の約束は、これまで「concept.md §5 逐字一致」という手作業の規律に依存していた。API Extractor で機械的に強制することで、意図しない surface 変更を CI で検出する。また「3 マイナー安定 vs 機能追加=マイナー」の自己矛盾（CEO/CPO 診断）を additive 解釈で解消する
+- **理由:** §12 の安定性の約束は、これまで「concept.md §5 逐字一致」という手作業の規律に依存していた。API Extractor で機械的に強制することで、意図しない surface 変更を CI で検出する。また「3 マイナー安定 vs 機能追加=マイナー」の自己矛盾を additive 解釈で解消する
 - **棄却した代替案:** (a) 手作業の逐字一致のみ継続 → human error で surface drift が起きうる (b) 「3 マイナー一切変更なし」と厳格解釈 → 機能追加（=マイナー）が一切できず v1 に到達不能
 
 ### DEC-025: v1 機能を単一 v0.2.0 で一括リリースする（「3 マイナー安定」窓の再定義）
@@ -1726,8 +1726,8 @@ concept.md 構築過程で浮上した未解決の論点。全件を「v1 リリ
 
 | # | 質問 | 起源 | 現在の仮説 | 解決条件 | v1 スコープ |
 |---|------|------|-----------|---------|------------|
-| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | **v1 in-scope（DEC-018/019）。** minamo は SnapshotStore 機構を v0.2.0 で提供し、閾値は consumer が `snapshotPolicy` で指定する。実測閾値は強制しない（CTO dissent への折衷） |
-| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | CxO 診断（2026-05-30）で ES 実務での普遍的需要を確認 | **v1 in-scope（DEC-018/020）。** v0.2.0 で `AggregateConfig.upcast` hook（consumer 所有の transform）として提供 |
+| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | **v1 in-scope（DEC-018/019）。** minamo は SnapshotStore 機構を v0.2.0 で提供し、閾値は consumer が `snapshotPolicy` で指定する。実測閾値は強制しない（YAGNI 懸念への折衷） |
+| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | 2026-05-30 の v1 設計レビューで ES 実務での普遍的需要を確認 | **v1 in-scope（DEC-018/020）。** v0.2.0 で `AggregateConfig.upcast` hook（consumer 所有の transform）として提供 |
 | OQ-3 | DynamoDB Streams の伝播レイテンシーの定量値 | §3 Streams 保持期間、§8 結果整合性リスク | 通常は数百ミリ秒〜数秒だが、AWS は公式 SLA を提供していない | AWS が公式に伝播レイテンシーの SLA を公開するか、実測データで十分な統計が得られた場合 | v1 スコープ外。minamo のコードに影響しない。ドキュメントで「公式 SLA なし」を注記 |
 | ~~OQ-4~~ | ~~複数 Aggregate 共有テーブルでの event type 衝突のベストプラクティス~~ | §5.7 shared table、DEC-009 | — | — | **解決済み。** DEC-009 で命名ポリシーを決定。ドキュメント作成は実装フェーズのタスク |
 | OQ-5 | executeCommand の backoff strategy の将来設計 | DEC-012 即時リトライ、§7 backoff 棄却 | `retryStrategy?: (attempt: number) => Promise<void>` をオプションとして追加する余地を残す。v1 は即時リトライ | 実運用で即時リトライの限界が確認された場合 | v1 スコープ外。v1 は即時リトライのまま |
@@ -1760,8 +1760,8 @@ minamo は **1 人メンテ**（seike460）のプロジェクトである。
 - **0.x:** API を磨くフェーズ。breaking change は許容される。ただし 0.x でも breaking change の前に **1 リリース deprecation 警告** を出す（行動指針: Compatibility is a Feature）
 - **1.0.0 の条件:** 以下を全て満たした場合（詳細・進捗は [`docs/roadmap-v1.md`](roadmap-v1.md)）
   - §10 Open Questions の v1 スコープ内項目が全て解決済み（OQ-1 Snapshot / OQ-2 upcasting は v0.2.0 で決着。DEC-025）
-  - 実プロジェクトでの dog-fooding 実績がある。加えて **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（CxO 診断 2026-05-30 で追加）
-  - **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。CxO 診断で追加）
+  - 実プロジェクトでの dog-fooding 実績がある。加えて **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（2026-05-30 の v1 設計レビューで追加）
+  - **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。設計レビューで追加）
   - 公開 API が 3 マイナーリリース以上安定している。ここで「安定」とは **既存 surface への breaking change なし**を指し、additive な追加は安定性と矛盾しない（DEC-024）。v1 機能は単一 v0.2.0 で一括導入し、以後 v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積むことを安定性の実証とする（DEC-025）。API Extractor gate で surface 差分を機械的に監視する
 - **1.x:** deprecation → 次の minor release で警告 → その次の minor release で削除。migration guide を必ず添付する
 - **2.x:** 現時点では計画しない

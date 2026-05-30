@@ -1,6 +1,6 @@
 # DEC-018: v1 スコープを「信頼性のため拡大」する
 
-**Status**: Accepted（CxO ラウンドテーブル 2026-05-30 / plan 承認済み）
+**Status**: Accepted（2026-05-30 の v1 設計レビュー）
 **Date**: 2026-05-30
 **Related**: concept.md §6, §11 DEC-018〜024, docs/roadmap-v1.md, DEC-006, DEC-014
 
@@ -8,12 +8,12 @@
 
 ## Trigger
 
-16 CxO ラウンドテーブル診断（平均健全度 ≈76）で、CPO / CRO / CDO / CSO が一致して次を指摘した:
+2026-05-30 の v1 設計レビューで、次の点が指摘された:
 
 - frozen scope は「正しく動く Write 側」として機能完成しているが、**イベントスキーマ進化（upcasting）と Snapshot を欠く**ため、§8 の「v1 採用非推奨条件」6 項目のうち 2 つ（長寿命 Aggregate / 頻繁なスキーマ変更）が実質的な利用障壁になっている
 - ES 実務でスキーマ進化と長寿命 Aggregate は普遍的に発生するため、これらを欠いたまま v1 を凍結すると「実務で使えない v1」になる
 
-一方 CTO / CFO は「Snapshot/upcasting エンジンを内蔵すると DEC-006/014 が崩れ、1 人メンテで保守不能」と反論した。
+一方、保守性の観点から「Snapshot/upcasting エンジンを内蔵すると DEC-006/014 が崩れ、1 人メンテで保守不能」という反論があった。
 
 ---
 
@@ -35,14 +35,14 @@
 2. **thin 原則との両立**: 「実装エンジン」ではなく「hook / interface」に留めることで、保守対象を最小化し 1 人メンテでも持続可能（DEC-019/020 が具体策）
 3. **DEC-006 との整合**: SnapshotStore を別 interface にすることで EventStore の最小契約（Contract Tests のための汎用性）を汚さない
 4. **DEC-014 との整合**: upcasting transform は「ドメイン固有ロジック」であり、AWS プリミティブをラップしないのと同じ思想で consumer に委ねる
-5. **CTO dissent への折衷**: Snapshot は閾値を強制せず policy を consumer が指定する機構のみ提供。実測前の YAGNI 懸念に対し「使いたい人だけが使う optional 機構」とする
+5. **YAGNI 懸念への折衷**: Snapshot は閾値を強制せず policy を consumer が指定する機構のみ提供。実測前の YAGNI 懸念に対し「使いたい人だけが使う optional 機構」とする
 
 ---
 
 ## Rejected Alternatives
 
 ### (a) thin 死守（Snapshot/upcasting を post-v1 据え置き）
-- ES 実務の壁が残り、CPO/CRO/CDO の「実務で v1 と呼べない」懸念が解消しない
+- ES 実務の壁が残り、「実務で v1 と呼べない」懸念が解消しない
 - 「採用非推奨条件」が長いまま固定され、市場リスク（§8）が増大
 
 ### (b) @ocoda 型の包括フレームワーク化（Read 側 / Saga まで内蔵）
