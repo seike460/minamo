@@ -1057,7 +1057,7 @@ export declare class DynamoSnapshotStore<TState> implements SnapshotStore<TState
 }
 ```
 
-### 5.11 Upcasting（v0.3.0+ / DEC-020）
+### 5.11 Upcasting（v0.2.0+ / DEC-020）
 
 永続化済みイベントは不変（immutable）であるため、スキーマ進化には過去イベントを現行スキーマへ変換する upcasting が必要になる。minamo は **consumer 所有の transform 関数**を `AggregateConfig.upcast` で受け取り、`rehydrate` が evolve 適用前に各イベントへ適用する。minamo 自身は upcaster エンジン（version 管理・連鎖変換）を持たない（thin / DEC-020）。
 
@@ -1364,6 +1364,13 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 - **判断:** `@microsoft/api-extractor` で公開 surface のレポート（`etc/minamo.api.md`）を生成・commit し、CI で差分を検出する gate を導入する。§12 の「公開 API が 3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」**（additive な追加は安定性と矛盾しない）と解釈する
 - **理由:** §12 の安定性の約束は、これまで「concept.md §5 逐字一致」という手作業の規律に依存していた。API Extractor で機械的に強制することで、意図しない surface 変更を CI で検出する。また「3 マイナー安定 vs 機能追加=マイナー」の自己矛盾（CEO/CPO 診断）を additive 解釈で解消する
 - **棄却した代替案:** (a) 手作業の逐字一致のみ継続 → human error で surface drift が起きうる (b) 「3 マイナー一切変更なし」と厳格解釈 → 機能追加（=マイナー）が一切できず v1 に到達不能
+
+### DEC-025: v1 機能を単一 v0.2.0 で一括リリースする（「3 マイナー安定」窓の再定義）
+
+- **トリガー:** v1 in-scope 機能（DEC-019〜024）が単一ブランチで相互依存しつつ実装・検証完了し、リリース粒度（機能別の段階分割 vs 一括）の選択がメンテナ判断に委ねられた（`docs/roadmap-v1.md` / changeset NOTE）
+- **判断:** v1 の全機能を **単一 v0.2.0** で additive にリリースする。roadmap-v1.md が当初想定した v0.2(ergonomics) → v0.3(upcasting) → v0.4(Snapshot) の機能別段階リリースは採らない。これに伴い「3 マイナーリリース以上安定」を **「v0.2.0 で v1 機能を一括導入し、以後 v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積むことで安定性を実証する窓」** と再定義する（v0.3 / v0.4 は post-v1 候補（OQ-5 backoff/jitter、`ExecuteObserver` の OTel 配線 helper 等）または保守リリースが入りうる）
+- **理由:** 機能群は相互依存して実装・検証済みであり、機能別の段階分割は stacked PR と API baseline の段階生成という運用コストを伴う。co-maintainer 不在（bus factor=1、§8）の現体制ではこの運用負荷が便益を上回る。§5.10〜5.13 の inline version 注記は既に `v0.2.0+` で整合しており、一括リリースは既存記述との齟齬が小さい
+- **棄却した代替案:** (a) roadmap 通り v0.2 / v0.3 / v0.4 に 3 分割 → roadmap には忠実だが、相互依存コードの分割リスクと 3 リリースサイクルの運用負荷が現体制では便益を上回る (b) 単一 v0.2.0 だが §12 を改訂しない → version↔feature 対応に齟齬が残り「3 マイナー安定」の解釈が宙に浮く
 
 ---
 
@@ -1719,8 +1726,8 @@ concept.md 構築過程で浮上した未解決の論点。全件を「v1 リリ
 
 | # | 質問 | 起源 | 現在の仮説 | 解決条件 | v1 スコープ |
 |---|------|------|-----------|---------|------------|
-| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | **v1 in-scope（DEC-018/019）。** minamo は SnapshotStore 機構を v0.4.0 で提供し、閾値は consumer が `snapshotPolicy` で指定する。実測閾値は強制しない（CTO dissent への折衷） |
-| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | CxO 診断（2026-05-30）で ES 実務での普遍的需要を確認 | **v1 in-scope（DEC-018/020）。** v0.3.0 で `AggregateConfig.upcast` hook（consumer 所有の transform）として提供 |
+| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | **v1 in-scope（DEC-018/019）。** minamo は SnapshotStore 機構を v0.2.0 で提供し、閾値は consumer が `snapshotPolicy` で指定する。実測閾値は強制しない（CTO dissent への折衷） |
+| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | CxO 診断（2026-05-30）で ES 実務での普遍的需要を確認 | **v1 in-scope（DEC-018/020）。** v0.2.0 で `AggregateConfig.upcast` hook（consumer 所有の transform）として提供 |
 | OQ-3 | DynamoDB Streams の伝播レイテンシーの定量値 | §3 Streams 保持期間、§8 結果整合性リスク | 通常は数百ミリ秒〜数秒だが、AWS は公式 SLA を提供していない | AWS が公式に伝播レイテンシーの SLA を公開するか、実測データで十分な統計が得られた場合 | v1 スコープ外。minamo のコードに影響しない。ドキュメントで「公式 SLA なし」を注記 |
 | ~~OQ-4~~ | ~~複数 Aggregate 共有テーブルでの event type 衝突のベストプラクティス~~ | §5.7 shared table、DEC-009 | — | — | **解決済み。** DEC-009 で命名ポリシーを決定。ドキュメント作成は実装フェーズのタスク |
 | OQ-5 | executeCommand の backoff strategy の将来設計 | DEC-012 即時リトライ、§7 backoff 棄却 | `retryStrategy?: (attempt: number) => Promise<void>` をオプションとして追加する余地を残す。v1 は即時リトライ | 実運用で即時リトライの限界が確認された場合 | v1 スコープ外。v1 は即時リトライのまま |
@@ -1752,10 +1759,10 @@ minamo は **1 人メンテ**（seike460）のプロジェクトである。
 
 - **0.x:** API を磨くフェーズ。breaking change は許容される。ただし 0.x でも breaking change の前に **1 リリース deprecation 警告** を出す（行動指針: Compatibility is a Feature）
 - **1.0.0 の条件:** 以下を全て満たした場合（詳細・進捗は [`docs/roadmap-v1.md`](roadmap-v1.md)）
-  - §10 Open Questions の v1 スコープ内項目が全て解決済み（OQ-1 Snapshot / OQ-2 upcasting は v0.4 / v0.3 で決着）
+  - §10 Open Questions の v1 スコープ内項目が全て解決済み（OQ-1 Snapshot / OQ-2 upcasting は v0.2.0 で決着。DEC-025）
   - 実プロジェクトでの dog-fooding 実績がある。加えて **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（CxO 診断 2026-05-30 で追加）
   - **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。CxO 診断で追加）
-  - 公開 API が 3 マイナーリリース以上安定している。ここで「安定」とは **既存 surface への breaking change なし**を指し、additive な追加（v0.2/v0.3/v0.4 の新 API）は安定性と矛盾しない（DEC-024）。API Extractor gate で surface 差分を機械的に監視する
+  - 公開 API が 3 マイナーリリース以上安定している。ここで「安定」とは **既存 surface への breaking change なし**を指し、additive な追加は安定性と矛盾しない（DEC-024）。v1 機能は単一 v0.2.0 で一括導入し、以後 v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積むことを安定性の実証とする（DEC-025）。API Extractor gate で surface 差分を機械的に監視する
 - **1.x:** deprecation → 次の minor release で警告 → その次の minor release で削除。migration guide を必ず添付する
 - **2.x:** 現時点では計画しない
 

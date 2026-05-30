@@ -38,27 +38,39 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 
 ## 4. リリースシーケンス
 
-すべて **additive（既存 surface への breaking change なし）** を原則とする。Phase 2 のみ retry 枯渇時の throw 型を変更するため deprecation 告知を伴う。
+すべて **additive（既存 surface への breaking change なし）** を原則とする。retry 枯渇時の throw 型変更のみ deprecation 告知を伴う（DEC-022）。
 
-| 版 | テーマ | 主要項目 | exit criteria |
-|---|---|---|---|
-| **v0.2.0** | DX + 観測性の土台 | `createCommandRunner` / `createEventStoreTable` facade / `ExecuteObserver` hooks / `NoInfer<TInput>` / API Extractor gate / coverage 閾値 / README pitch | 既存 surface 非破壊・API gate 稼働・facade の TMap narrowing 型テスト pass |
-| **v0.2.0**(同梱) | retry 観測性 | `RetryExhaustedError { cause, attempts }`（旧: 生 ConcurrencyError throw を deprecation） | instanceof 検証 / 既存 retry テスト更新 / R13 設計-実装乖離の解消 |
-| **v0.3.0** | スキーマ進化 | `AggregateConfig.upcast` hook（`Upcaster<TMap>`） | rehydrate が upcast → 検証 → evolve 順で動作・upcast 未指定は非破壊 |
-| **v0.4.0** | 長寿命 Aggregate | `SnapshotStore` / `InMemorySnapshotStore` / `DynamoSnapshotStore` / `EventStore.loadFrom?` / `executeCommand` snapshot 統合 | Snapshot Contract Test が InMemory/Dynamo 両方 green・rehydration コスト削減を assert |
-| **v1.0.0** | 凍結 | （新規機能なし。API 凍結と保証の明文化） | §5 卒業条件を全充足 |
+**v1 機能は単一 v0.2.0 で一括リリースする（DEC-025）。** 当初は機能別に v0.2(ergonomics) → v0.3(upcasting) → v0.4(Snapshot) と段階リリースする想定だったが、機能群が相互依存して実装・検証済みであること、および co-maintainer 不在下での運用負荷を踏まえ一括導入に確定した。「3 マイナー安定」窓の扱いは §5 を参照。
+
+**v0.2.0 が一括導入する v1 機能群:**
+
+| カテゴリ | 主要項目 | exit criteria |
+|---|---|---|
+| DX + 観測性の土台 | `createCommandRunner` / `createEventStoreTable` facade / `ExecuteObserver` hooks / `NoInfer<TInput>` / API Extractor gate / coverage 閾値 / README pitch | 既存 surface 非破壊・API gate 稼働・facade の TMap narrowing 型テスト pass |
+| retry 観測性 | `RetryExhaustedError { cause, attempts }`（旧: 生 ConcurrencyError throw を deprecation） | instanceof 検証 / 既存 retry テスト更新 / R13 設計-実装乖離の解消 |
+| スキーマ進化 | `AggregateConfig.upcast` hook（`Upcaster<TMap>`） | rehydrate が upcast → 検証 → evolve 順で動作・upcast 未指定は非破壊 |
+| 長寿命 Aggregate | `SnapshotStore` / `InMemorySnapshotStore` / `DynamoSnapshotStore` / `EventStore.loadFrom?` / `executeCommand` snapshot 統合 | Snapshot Contract Test が InMemory/Dynamo 両方 green・rehydration コスト削減を assert |
+
+**リリースシーケンス（安定性実証窓）:**
+
+| 版 | 役割 |
+|---|---|
+| **v0.2.0** | v1 機能を一括導入（上表） |
+| **v0.3.0** | 安定性実証窓（既存 surface 非破壊）。post-v1 候補（OQ-5 backoff/jitter・`ExecuteObserver` の OTel 配線 helper 等）または保守リリースが入りうる |
+| **v0.4.0** | 安定性実証窓（同上） |
+| **v1.0.0** | 凍結（新規機能なし。API 凍結と保証の明文化）。§5 卒業条件を全充足 |
 
 ## 5. 1.0.0 卒業条件
 
-§12 の「3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」** と解釈する（additive 追加は安定性と矛盾しない。DEC-024）。
+§12 の「3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」** と解釈する（additive 追加は安定性と矛盾しない。DEC-024）。v1 機能は単一 v0.2.0 で一括導入し、以後の v0.2 → v0.3 → v0.4 を安定性の実証窓とする（DEC-025）。
 
-- [ ] v1 in-scope の Open Questions が全解決（OQ-1 Snapshot / OQ-2 upcasting は v0.3/v0.4 で決着）
-- [ ] **additive な 3 マイナー（v0.2 / v0.3 / v0.4）が breaking change なしで安定**
+- [ ] v1 in-scope の Open Questions が全解決（OQ-1 Snapshot / OQ-2 upcasting は v0.2.0 で決着）
+- [ ] **v0.2.0 で v1 機能を一括導入し、v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積む**
 - [ ] API Extractor gate が CI で稼働し、surface 差分が常にレビューされる
 - [ ] **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（dog-fooding 1 件のみでは不十分）
 - [ ] **co-maintainer ≥1 名の獲得**（bus factor=1 の解消。CHRO 卒業条件）
 
-> **コードと 1.0.0 タグの区別:** 本ロードマップの v0.2〜v0.4 で **v1 の全機能は実装される**。ただし 1.0.0 タグは上記の非コード条件（3 マイナー安定 / 外部採用 / co-maintainer）の充足後に押す。機能実装の完了 ≠ 1.0.0 リリース。
+> **コードと 1.0.0 タグの区別:** **v0.2.0 で v1 の全機能が実装される**。ただし 1.0.0 タグは上記の非コード条件（3 マイナー安定 / 外部採用 / co-maintainer）の充足後に押す。機能実装の完了 ≠ 1.0.0 リリース。
 
 ## 6. CxO 議論の裁定と少数意見
 
