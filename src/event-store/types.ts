@@ -58,6 +58,23 @@ export interface EventStore<TMap extends EventMap> {
    * - fresh read の実現方法は実装が責任を持つ
    */
   load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+
+  /**
+   * Optional: version が `afterVersion` より大きいイベントだけを昇順で読み込む (v0.2.0+, DEC-019)。
+   *
+   * Snapshot からの部分 rehydration を効率化するための optional method。
+   * - 実装しない store では `executeCommand` が `load()` 全件取得 + filter にフォールバックする
+   * - 返り値の各 version は `afterVersion` より大きく、昇順・連番
+   * - `afterVersion` 以下のイベントしか無い場合は空配列を返す
+   * - fresh read 保証は `load()` と同じ
+   *
+   * @param aggregateId - 対象 Aggregate の ID。
+   * @param afterVersion - この version より大きいイベントを返す (この version 自体は含まない)。
+   */
+  loadFrom?(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 }
 
 /**

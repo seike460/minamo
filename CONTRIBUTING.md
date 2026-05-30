@@ -19,12 +19,15 @@ pnpm run lint
 pnpm run test
 pnpm run build
 pnpm run check-exports      # attw + publint
+pnpm run check-api          # api-extractor: 公開 surface の差分検出
 ```
+
+公開 API を意図的に変更した場合は `pnpm run api-report` で `etc/minamo.api.md` を更新し、差分を commit する（CI の `check-api` が未レビューの surface drift で fail する。DEC-024）。
 
 DynamoDB Local を使う integration tests:
 
 ```bash
-docker compose up -d dynamodb
+docker compose up -d dynamodb-local
 pnpm run test:integration
 ```
 
@@ -33,8 +36,12 @@ pnpm run test:integration
 1. Issue または discussion で合意
 2. feature branch を切り実装 (test-first を推奨、Contract Tests 対象の変更は InMemory/Dynamo 両方で green)
 3. `pnpm changeset` で changeset を追加 (`minor` / `patch` を選択)
-4. PR を開く。CI (lint / type-check / unit / build / attw + publint / typedoc / integration / CodeQL) が全て green であること
+4. PR を開く。CI (lint / type-check / unit + coverage / build / attw + publint / api-extractor / typedoc / integration / CodeQL) が全て green であること
 5. review → merge 後、`changesets/action` が Release PR を自動生成
+
+## Governance
+
+意思決定プロセス・役割（Contributor / Committer / Co-maintainer）・co-maintainer になる道筋は [`GOVERNANCE.md`](GOVERNANCE.md) を参照。1 人メンテの現状と継続性（bus factor / fork 権利）もそこで明示している。
 
 ## Releases
 

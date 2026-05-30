@@ -79,44 +79,41 @@ afterAll(async () => {
  * DynamoDB Local への実書き込みが必要なケースに絞る。
  */
 describe("DynamoEventStore — DDB-specific integration", () => {
-  it.skipIf(!available)(
-    "CT-DDB-01 append N=99 succeeds with continuous version 1..99",
-    async () => {
-      const store = new DynamoEventStore<CounterEvents>({
-        tableName: TABLE_NAME,
-        clientConfig: CLIENT_CONFIG,
-      });
-      const events = Array.from({ length: 99 }, (_, i) => ({
-        type: "Incremented" as const,
-        data: { amount: i + 1 },
-      }));
-      const appended = await store.append("agg-n99", events, 0);
-      expect(appended).toHaveLength(99);
-      expect(appended[0]?.version).toBe(1);
-      expect(appended[98]?.version).toBe(99);
+  it("CT-DDB-01 append N=99 succeeds with continuous version 1..99", async (ctx) => {
+    if (!available) ctx.skip();
+    const store = new DynamoEventStore<CounterEvents>({
+      tableName: TABLE_NAME,
+      clientConfig: CLIENT_CONFIG,
+    });
+    const events = Array.from({ length: 99 }, (_, i) => ({
+      type: "Incremented" as const,
+      data: { amount: i + 1 },
+    }));
+    const appended = await store.append("agg-n99", events, 0);
+    expect(appended).toHaveLength(99);
+    expect(appended[0]?.version).toBe(1);
+    expect(appended[98]?.version).toBe(99);
 
-      const loaded = await store.load("agg-n99");
-      expect(loaded).toHaveLength(99);
-      expect(loaded.map((e) => e.version)).toEqual(events.map((_, i) => i + 1));
-    },
-  );
+    const loaded = await store.load("agg-n99");
+    expect(loaded).toHaveLength(99);
+    expect(loaded.map((e) => e.version)).toEqual(events.map((_, i) => i + 1));
+  });
 
-  it.skipIf(!available)(
-    "CT-DDB-02 append N=100 throws EventLimitError before DDB call",
-    async () => {
-      const store = new DynamoEventStore<CounterEvents>({
-        tableName: TABLE_NAME,
-        clientConfig: CLIENT_CONFIG,
-      });
-      const events = Array.from({ length: 100 }, (_, i) => ({
-        type: "Incremented" as const,
-        data: { amount: i + 1 },
-      }));
-      await expect(store.append("agg-n100", events, 0)).rejects.toBeInstanceOf(EventLimitError);
-    },
-  );
+  it("CT-DDB-02 append N=100 throws EventLimitError before DDB call", async (ctx) => {
+    if (!available) ctx.skip();
+    const store = new DynamoEventStore<CounterEvents>({
+      tableName: TABLE_NAME,
+      clientConfig: CLIENT_CONFIG,
+    });
+    const events = Array.from({ length: 100 }, (_, i) => ({
+      type: "Incremented" as const,
+      data: { amount: i + 1 },
+    }));
+    await expect(store.append("agg-n100", events, 0)).rejects.toBeInstanceOf(EventLimitError);
+  });
 
-  it.skipIf(!available)("CT-DDB-06 load works across multiple QueryCommand pages", async () => {
+  it("CT-DDB-06 load works across multiple QueryCommand pages", async (ctx) => {
+    if (!available) ctx.skip();
     // 大 payload event を 50 件 append して Query の 1MB/page を超える。
     // DynamoDB Local も LastEvaluatedKey pagination を忠実に再現する。
     type BigEvents = { Bloat: { padding: string } };

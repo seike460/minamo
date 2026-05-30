@@ -33,6 +33,49 @@ export class ConcurrencyError extends Error {
 }
 
 /**
+ * `executeCommand` が `1 + maxRetries` 回の append 試行でも `ConcurrencyError` を解消できなかったことを示す (DEC-022)。
+ *
+ * v0.1.x では retry 枯渇時に最後の `ConcurrencyError` をそのまま throw していたが、試行回数情報が
+ * 失われていた。v0.2.0 以降はこのエラーでラップし、`attempts` (総試行回数 = 1 + maxRetries) と
+ * `cause` (最後に観測した `ConcurrencyError`、ES2022 error cause) を提供する。
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await executeCommand({ ... });
+ * } catch (err) {
+ *   if (err instanceof RetryExhaustedError) {
+ *     // err.attempts: 試行回数 / err.cause: 最後の ConcurrencyError
+ *     metrics.increment("aggregate.retry_exhausted");
+ *   }
+ * }
+ * ```
+ */
+export class RetryExhaustedError extends Error {
+  /** Error サブクラスを識別するための literal name (minifier 耐性)。 */
+  readonly name = "RetryExhaustedError" as const;
+  /**
+   * 最後に観測した `ConcurrencyError` (ES2022 error cause)。
+   * `declare` で runtime field initializer を発生させず、`super(message, { cause })` が設定した値を保つ。
+   */
+  declare readonly cause: ConcurrencyError;
+
+  constructor(
+    /** 競合が解消しなかった Aggregate の ID。 */
+    readonly aggregateId: string,
+    /** 実際に行った append 試行の総回数 (= 1 + maxRetries)。 */
+    readonly attempts: number,
+    cause: ConcurrencyError,
+  ) {
+    super(
+      `Concurrency conflict on aggregate ${aggregateId} unresolved after ${attempts} attempt(s)`,
+      { cause },
+    );
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
  * Standard Schema の validate 失敗時に throw されるエラー。
  *
  * `issues` には vendor (Zod / Valibot / ArkType 等) が提供した構造化された違反情報が

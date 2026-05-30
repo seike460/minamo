@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ConcurrencyError, executeCommand, InMemoryEventStore } from "../src/index.js";
+import {
+  ConcurrencyError,
+  executeCommand,
+  InMemoryEventStore,
+  RetryExhaustedError,
+} from "../src/index.js";
 import { AlwaysFail, CountingStore, FailOnce } from "./doubles/event-store-doubles.js";
 import { type CounterEvents, counterConfig, incrementHandler } from "./fixtures/counter.js";
 
@@ -33,22 +38,27 @@ describe("executeCommand", () => {
     expect(store.appendCalls).toBe(0);
   });
 
-  it("CT-EC-03 maxRetries=0 + ConcurrencyError → propagates without retry", async () => {
+  it("CT-EC-03 maxRetries=0 + ConcurrencyError → RetryExhaustedError without retry", async () => {
     const store = new AlwaysFail<CounterEvents>();
     let handlerCalls = 0;
-    await expect(
-      executeCommand({
-        config: counterConfig,
-        store,
-        handler: (a, i) => {
-          handlerCalls += 1;
-          return incrementHandler(a, i);
-        },
-        aggregateId: "agg-1",
-        input: { amount: 1 },
-        maxRetries: 0,
-      }),
-    ).rejects.toBeInstanceOf(ConcurrencyError);
+    const err: unknown = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: (a, i) => {
+        handlerCalls += 1;
+        return incrementHandler(a, i);
+      },
+      aggregateId: "agg-1",
+      input: { amount: 1 },
+      maxRetries: 0,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RetryExhaustedError);
+    if (!(err instanceof RetryExhaustedError)) throw new Error("expected RetryExhaustedError");
+    expect(err.attempts).toBe(1); // 1 + maxRetries(0)
+    expect(err.cause).toBeInstanceOf(ConcurrencyError);
     expect(handlerCalls).toBe(1);
   });
 
@@ -71,22 +81,28 @@ describe("executeCommand", () => {
     expect(handlerCalls).toBe(2);
   });
 
-  it("CT-EC-05 maxRetries=3 + AlwaysFail → exhausted (handler called 4 times)", async () => {
+  it("CT-EC-05 maxRetries=3 + AlwaysFail → RetryExhaustedError (handler called 4 times)", async () => {
     const store = new AlwaysFail<CounterEvents>();
     let handlerCalls = 0;
-    await expect(
-      executeCommand({
-        config: counterConfig,
-        store,
-        handler: (a, i) => {
-          handlerCalls += 1;
-          return incrementHandler(a, i);
-        },
-        aggregateId: "agg-1",
-        input: { amount: 1 },
-        maxRetries: 3,
-      }),
-    ).rejects.toBeInstanceOf(ConcurrencyError);
+    const err: unknown = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: (a, i) => {
+        handlerCalls += 1;
+        return incrementHandler(a, i);
+      },
+      aggregateId: "agg-1",
+      input: { amount: 1 },
+      maxRetries: 3,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RetryExhaustedError);
+    if (!(err instanceof RetryExhaustedError)) throw new Error("expected RetryExhaustedError");
+    expect(err.attempts).toBe(4); // 1 + maxRetries(3)
+    expect(err.cause).toBeInstanceOf(ConcurrencyError);
+    expect(err.aggregateId).toBe("agg-1");
     expect(handlerCalls).toBe(4);
   });
 

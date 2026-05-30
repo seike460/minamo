@@ -12,10 +12,23 @@
 minamo is a CQRS + Event Sourcing library for TypeScript / Node 24 / AWS SDK v3 that stays thin, strict, and lets you write the write side in your domain's own words. It exposes exactly four public surfaces — Aggregate, Command, Event, and Projection Bridge — and never takes AWS primitives out of your hands.
 
 - **No SLA.** Production guarantees are the consumer's responsibility
-- **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome
+- **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome — see [`GOVERNANCE.md`](GOVERNANCE.md) for roles and the path to becoming a co-maintainer
 - **MIT License**
 
-> Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim and is unchanged across the 0.1.x patch line.
+> Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim. The path to v1 is tracked in [`docs/roadmap-v1.md`](docs/roadmap-v1.md).
+
+---
+
+## Why minamo?
+
+Doing CQRS + Event Sourcing on **DynamoDB + Lambda + TypeScript**? The write side is where correctness is hardest — optimistic locking, retry-from-load, and keeping your tests honest against production. minamo solves exactly that, and nothing more:
+
+- **DynamoDB-first, not multi-DB.** `TransactWriteItems` + `ConsistentRead` are baked into the design, not hidden behind a portable adapter.
+- **Full-cycle retry as a core API.** `executeCommand` owns Load → Rehydrate → Decide → Append and retries the *whole cycle* on `ConcurrencyError` — the wiring hand-rolled implementations get wrong.
+- **InMemory ⇄ DynamoDB parity, guaranteed.** Both stores run the same Contract Tests, so your tests can't pass while production breaks.
+- **One runtime dependency.** AWS SDK v3 (optional peer). Minimal cold-start and dependency surface.
+
+Full comparison with castore and @ocoda/event-sourcing: [`docs/concept.md` §7](docs/concept.md). Not sure if you need CQRS+ES at all? §1–§2 of the concept doc help you decide.
 
 ---
 
@@ -167,6 +180,10 @@ Runnable examples under [`examples/`](examples/) mirror the code in this README 
 - [`examples/multi-aggregate-projection/`](examples/multi-aggregate-projection/) — Route N Aggregates through one Lambda with `parseStreamRecord` + `eventNamesOf` (DEC-009 + DEC-013)
 - [`examples/projected-event-store/`](examples/projected-event-store/) — Consumer Decorator for sync projection and a `createCommandRunner` factory. Shows how to handle append → projection without adding hooks to the core API (DEC-013 / DEC-014)
 - [`examples/dynamodb-local/`](examples/dynamodb-local/) — End-to-end `DynamoEventStore` on Docker DynamoDB Local (append / load / rehydrate / `ConcurrencyError`)
+- [`examples/upcasting/`](examples/upcasting/) — Schema evolution via `AggregateConfig.upcast` (consumer-owned transform, DEC-020)
+- [`examples/snapshot/`](examples/snapshot/) — `SnapshotStore` + `snapshotPolicy` to shorten rehydration, with `ExecuteObserver` showing the replay-count reduction (DEC-019 / DEC-021)
+
+> The path from the current v0.1.x to v1.0.0 is tracked in [`docs/roadmap-v1.md`](docs/roadmap-v1.md).
 
 ## License
 

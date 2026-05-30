@@ -12,10 +12,23 @@
 minamo は TypeScript / Node 24 / AWS SDK v3 を前提とした、薄く・厳しく・ドメインの言葉で書ける CQRS+ES ライブラリです。Aggregate / Command / Event / Projection Bridge の 4 つの公開 API だけを提供し、AWS プリミティブは consumer の手から取り上げません。
 
 - **SLA なし**。production 保証は consumer 責務です
-- **1 人メンテ** ([@seike460](https://github.com/seike460))。Pull Request 歓迎
+- **1 人メンテ** ([@seike460](https://github.com/seike460))。Pull Request 歓迎 — 役割と co-maintainer への道筋は [`GOVERNANCE.md`](GOVERNANCE.md) 参照
 - **MIT License**
 
-> Status: npm (`@seike460/minamo`) で公開中（最新版は上記 npm バッジを参照）。公開 API は [`docs/concept.md`](docs/concept.md) §5 に逐字従属し、0.1.x patch 系列で不変です。
+> Status: npm (`@seike460/minamo`) で公開中（最新版は上記 npm バッジを参照）。公開 API は [`docs/concept.md`](docs/concept.md) §5 に逐字従属します。v1 への道筋は [`docs/roadmap-v1.md`](docs/roadmap-v1.md) を参照。
+
+---
+
+## なぜ minamo か
+
+**DynamoDB + Lambda + TypeScript** で CQRS + Event Sourcing を実装するとき、最も正しく書くのが難しいのは Write 側です — 楽観的ロック、Load からのリトライ、そして本番と乖離しないテスト。minamo はそこだけを、過不足なく解きます:
+
+- **DynamoDB ファースト（マルチ DB ではない）。** `TransactWriteItems` + `ConsistentRead` を移植可能な adapter の裏に隠さず、設計に直接組み込む。
+- **全サイクルリトライを中核 API に。** `executeCommand` が Load → Rehydrate → Decide → Append を所有し、`ConcurrencyError` 時に*サイクル全体*をやり直す — 自前実装が最も間違える配線。
+- **InMemory ⇄ DynamoDB の振る舞い一致を保証。** 両ストアが同じ Contract Tests を通るため、「テストは通るが本番で壊れる」が構造的に起きない。
+- **runtime 依存は 1 つ。** AWS SDK v3（optional peer）。Cold Start と依存表面を最小化。
+
+castore / @ocoda/event-sourcing との比較は [`docs/concept.md` §7](docs/concept.md)。そもそも CQRS+ES が必要かは concept doc の §1〜§2 が判断を助けます。
 
 ---
 

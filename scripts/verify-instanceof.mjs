@@ -4,6 +4,7 @@ import {
   EventLimitError,
   InvalidEventStreamError,
   InvalidStreamRecordError,
+  RetryExhaustedError,
   ValidationError,
 } from "../dist/index.js";
 
@@ -78,6 +79,22 @@ assert.strictEqual(
   Object.hasOwn(invalidRecordNoDetail, "detail"),
   false,
   "detail property must be absent when undefined is passed",
+);
+
+const cause = new ConcurrencyError("agg-retry", 7);
+const retryExhausted = new RetryExhaustedError("agg-retry", 4, cause);
+assert(retryExhausted instanceof Error, "RetryExhaustedError must be instanceof Error");
+assert(
+  retryExhausted instanceof RetryExhaustedError,
+  "RetryExhaustedError must be instanceof RetryExhaustedError",
+);
+assert.strictEqual(retryExhausted.name, "RetryExhaustedError", "name must be RetryExhaustedError");
+assert.strictEqual(retryExhausted.aggregateId, "agg-retry", "aggregateId must match");
+assert.strictEqual(retryExhausted.attempts, 4, "attempts must match");
+assert.strictEqual(retryExhausted.cause, cause, "cause must be the wrapped ConcurrencyError");
+assert(
+  retryExhausted.cause instanceof ConcurrencyError,
+  "cause must be instanceof ConcurrencyError",
 );
 
 console.log("✓ instanceof verification passed (post-build)");

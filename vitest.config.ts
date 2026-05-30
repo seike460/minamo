@@ -15,8 +15,20 @@ export default defineConfig({
         "src/standard-schema.ts",
         "src/**/types.ts",
         "src/core/aggregate.ts",
+        "src/observability.ts",
       ],
       reporter: ["text", "json-summary", "html"],
+      // 後退を CI で検出する閾値 (DEC-024 / CTeO・COO 指摘)。
+      // unit-only 計測のため DynamoEventStore / DynamoSnapshotStore (event-store/dynamo/*) は
+      // integration test 側でカバーされ unit では低めに出る。特に functions は integration-only の
+      // method (loadFrom / snapshot load・save 等) が押し下げるため低めの下限とする。
+      // 現状値 (stmts 86 / branch 91 / func 78 / lines 86) に余裕を持たせた下限。
+      thresholds: {
+        statements: 78,
+        branches: 78,
+        functions: 72,
+        lines: 78,
+      },
     },
     projects: [
       {

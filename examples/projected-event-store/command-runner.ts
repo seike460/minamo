@@ -7,8 +7,12 @@
  * 呼び出しは `increment(aggregateId, input)` まで縮む。
  *
  * `executeCommand` の object params は optional 拡張 (`maxRetries` / `correlationId` /
- * 将来の追加) を breaking change にしないための意図選択。本 factory は本体 API に
- * 昇格させず、consumer が各自でコピーする recipe のまま維持する。
+ * 将来の追加) を breaking change にしないための意図選択。
+ *
+ * NOTE: v0.2.0 でこの recipe は first-party `createCommandRunner`（DEC-023, concept.md §5.13）
+ * に昇格した。新規コードでは `import { createCommandRunner } from "@seike460/minamo"` を推奨する
+ * （`observer` / `snapshotStore` の defaults もまとめられる）。本 recipe は「内部で何が起きているか」
+ * を示す教材として残す。
  */
 import {
   type AggregateConfig,
