@@ -36,4 +36,4 @@ The items below surface in real projects using minamo (notably a 11-Aggregate se
 
 ---
 
-Last reviewed: 2026-04-18 (post v0.1.3 user feedback review).
+Last reviewed: 2026-05-30 (§7 alternatives re-verified: castore core/adapter both v2.4.2, @ocoda v3.0.0).

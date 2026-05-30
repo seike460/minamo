@@ -4,10 +4,12 @@
 - minamo -- Type-safe CQRS+ES for AWS Serverless
 - npm: @seike460/minamo | GitHub: seike460/minamo | License: MIT
 
-## Current Phase: Release Prep (v0.1.0)
+## Current Phase: Released / v0.1.x Maintenance
+- Published: npm `@seike460/minamo` (0.1.x line, public API frozen per concept.md §5)
 - Concept: docs/concept.md (approved)
 - Design principles: docs/concept.md §4 "設計の姿勢"
 - Detailed design: docs/design/v0.1.0.md (§5 実装計画・モジュール構造・test strategy)
+- Future work: docs/roadmap.md (v0.2.x candidates, not committed)
 
 ## Toolchain
 - Build: tsdown (Rolldown-based, ESM-only output)
@@ -49,7 +51,7 @@
 - exports: `{ ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } }`
 - sideEffects: false
 - engines: `{ "node": ">=24" }`
-- peerDependencies: @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, @aws-sdk/util-dynamodb (^3.0.0) -- `peerDependenciesMeta.optional` 指定。DynamoEventStore 未実装の間は consumer に AWS SDK を強制しない設計。DynamoEventStore 実装後に optional 解除を検討する
+- peerDependencies: @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, @aws-sdk/util-dynamodb (^3.0.0) -- `peerDependenciesMeta.optional` 指定。DynamoEventStore は実装済みだが、InMemoryEventStore のみ使う consumer に AWS SDK を強制しないため optional を維持する
 
 ## Git
 - Conventional commits: feat/fix/chore/docs/refactor/test
