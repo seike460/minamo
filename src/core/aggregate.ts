@@ -1,5 +1,5 @@
 import type { ReadonlyDeep } from "../types.js";
-import type { EventMap, Evolver } from "./types.js";
+import type { EventMap, Evolver, Upcaster } from "./types.js";
 
 /**
  * Aggregate の定義: 初期状態とイベントごとの状態進化関数。
@@ -17,6 +17,11 @@ export interface AggregateConfig<TState, TMap extends EventMap> {
   readonly initialState: ReadonlyDeep<TState>;
   /** 各 event type に対応する evolve 純関数のマップ。 */
   readonly evolve: Evolver<TState, TMap>;
+  /**
+   * Optional: 永続化済みイベントを現行スキーマへ変換する upcasting hook (concept.md §5.11, DEC-020)。
+   * 未指定なら identity（変換なし）で v0.1.x と完全後方互換。`rehydrate` が evolve 適用前に各イベントへ適用する。
+   */
+  readonly upcast?: Upcaster<TMap>;
 }
 
 /**

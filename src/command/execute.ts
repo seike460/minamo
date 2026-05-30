@@ -29,9 +29,14 @@ function replayEvents<TState, TMap extends EventMap>(
   baseVersion: number,
   events: ReadonlyArray<StoredEventsOf<TMap>>,
 ): Aggregate<TState> {
+  // upcasting (DEC-020): version/aggregateId 検証・evolve の前に consumer 所有の変換を適用する。
+  // upcast はメタデータ (aggregateId/version) を保持する契約なので version 検証は変換後でも等価。
+  const { upcast } = config;
+  const normalized = upcast === undefined ? events : events.map((e) => upcast(e));
+
   let prevVersion = baseVersion;
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
+  for (let i = 0; i < normalized.length; i++) {
+    const e = normalized[i];
     if (e === undefined) continue;
 
     if (e.aggregateId !== id) {
@@ -94,7 +99,7 @@ function replayEvents<TState, TMap extends EventMap>(
   }
 
   let state = baseState;
-  for (const e of events) {
+  for (const e of normalized) {
     const handler = config.evolve[e.type as keyof TMap & string];
     if (handler === undefined) continue;
     state = handler(
@@ -106,7 +111,7 @@ function replayEvents<TState, TMap extends EventMap>(
   return {
     id,
     state: state as ReadonlyDeep<TState>,
-    version: baseVersion + events.length,
+    version: baseVersion + normalized.length,
   };
 }
 

@@ -9,6 +9,7 @@ export type {
   Evolver,
   StoredEvent,
   StoredEventsOf,
+  Upcaster,
 } from "./core/types.js";
 export type {
   InvalidEventStreamDetails,

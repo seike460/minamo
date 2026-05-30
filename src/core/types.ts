@@ -73,6 +73,23 @@ export type StoredEventsOf<TMap extends EventMap> = {
 }[keyof TMap & string];
 
 /**
+ * 永続化済みイベントを現行スキーマの `StoredEvent` へ変換する純関数（consumer 所有。concept.md §5.11, DEC-020）。
+ *
+ * - `rehydrate` が version/aggregateId 検証の後、evolve/type 検証の前に各イベントへ適用する
+ * - 変換不要なイベントはそのまま返す（identity）
+ * - `aggregateId` / `version` / `timestamp` などのメタデータは保持すること
+ * - 決定的・副作用なしであること（`rehydrate` は複数回呼ばれうる）
+ *
+ * minamo 自身は upcaster エンジン（version 管理・連鎖変換）を持たない。スキーマ進化の
+ * ロジックはドメイン固有であり consumer が所有する（DEC-020）。
+ *
+ * @typeParam TMap - Aggregate が扱うイベント型マップ。
+ */
+export type Upcaster<TMap extends EventMap> = (
+  raw: StoredEvent<string, unknown>,
+) => StoredEventsOf<TMap>;
+
+/**
  * 状態進化関数のマップ: 各イベント型に対して state を進化させる純粋関数。
  *
  * - state と data は `ReadonlyDeep` で渡される。破壊的変更は型で禁止する
