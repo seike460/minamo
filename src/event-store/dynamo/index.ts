@@ -141,6 +141,28 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
   }
 
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    return this.#query("aggregateId = :id", { ":id": aggregateId });
+  }
+
+  /**
+   * version が `afterVersion` より大きいイベントだけを昇順で読み込む (concept.md §5.4, DEC-019)。
+   * Snapshot からの部分 rehydration を効率化する。`ConsistentRead: true` は load と同じ。
+   */
+  async loadFrom(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    return this.#query("aggregateId = :id AND version > :v", {
+      ":id": aggregateId,
+      ":v": afterVersion,
+    });
+  }
+
+  /** Query を `LastEvaluatedKey` で完走させ、unmarshal 済みの StoredEvent 列を返す内部共通処理。 */
+  async #query(
+    keyConditionExpression: string,
+    expressionAttributeValues: Record<string, unknown>,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
@@ -148,8 +170,8 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       const result = await this.#doc.send(
         new QueryCommand({
           TableName: this.#tableName,
-          KeyConditionExpression: "aggregateId = :id",
-          ExpressionAttributeValues: { ":id": aggregateId },
+          KeyConditionExpression: keyConditionExpression,
+          ExpressionAttributeValues: expressionAttributeValues,
           ConsistentRead: true,
           ScanIndexForward: true,
           ExclusiveStartKey: exclusiveStartKey,

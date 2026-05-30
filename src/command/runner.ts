@@ -40,7 +40,9 @@ export function createCommandRunner<TState, TMap extends EventMap>(deps: {
   correlationId?: string;
   observer?: ExecuteObserver;
 }) => Promise<{
+  /** append 後の最新 Aggregate (no-op 時は現在の状態そのまま)。 */
   aggregate: Aggregate<TState>;
+  /** append で追加された StoredEvent 列 (no-op 時は `[]`)。 */
   newEvents: ReadonlyArray<StoredEventsOf<TMap>>;
 }> {
   const { config, store, defaults } = deps;

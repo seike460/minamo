@@ -26,6 +26,8 @@ export {
 } from "./errors.js";
 export type { DynamoEventStoreConfig } from "./event-store/dynamo/index.js";
 export { DynamoEventStore } from "./event-store/dynamo/index.js";
+export type { DynamoSnapshotStoreConfig } from "./event-store/dynamo/snapshot.js";
+export { DynamoSnapshotStore } from "./event-store/dynamo/snapshot.js";
 export type { EventStoreTable } from "./event-store/dynamo/table.js";
 export { createEventStoreTable } from "./event-store/dynamo/table.js";
 export { InMemoryEventStore } from "./event-store/in-memory.js";
@@ -33,6 +35,7 @@ export type { AppendOptions, EventStore } from "./event-store/types.js";
 export type { ExecuteObserver } from "./observability.js";
 export type { ParseStreamRecordOptions } from "./projection/bridge.js";
 export { eventNamesOf, parseStreamRecord } from "./projection/bridge.js";
+export { InMemorySnapshotStore } from "./snapshot/in-memory.js";
 export type { Snapshot, SnapshotPolicy, SnapshotStore } from "./snapshot/types.js";
 export type {
   InferSchemaInput,

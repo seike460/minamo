@@ -193,5 +193,24 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       expect(a.map((e) => e.version)).toEqual([1, 2]);
       expect(b.map((e) => e.version)).toEqual([1]);
     });
+
+    it("CT-14 loadFrom returns only events after the given version (when supported)", async () => {
+      const store = await makeStore();
+      // loadFrom は optional method (DEC-019)。未実装の store はこの契約の対象外。
+      if (typeof store.loadFrom !== "function") return;
+      const aggregateId = "agg-14";
+      await store.append(
+        aggregateId,
+        [
+          { type: "Incremented", data: { amount: 1 } },
+          { type: "Incremented", data: { amount: 2 } },
+          { type: "Incremented", data: { amount: 3 } },
+        ],
+        0,
+      );
+      expect((await store.loadFrom(aggregateId, 0)).map((e) => e.version)).toEqual([1, 2, 3]);
+      expect((await store.loadFrom(aggregateId, 1)).map((e) => e.version)).toEqual([2, 3]);
+      expect((await store.loadFrom(aggregateId, 3)).map((e) => e.version)).toEqual([]);
+    });
   });
 }

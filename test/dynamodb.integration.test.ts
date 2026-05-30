@@ -5,10 +5,15 @@ import {
   type DynamoDBClientConfig,
 } from "@aws-sdk/client-dynamodb";
 import { afterAll, beforeAll, describe, it } from "vitest";
-import { DynamoEventStore } from "../src/index.js";
+import { DynamoEventStore, DynamoSnapshotStore } from "../src/index.js";
 import { type CounterEvents, registerEventStoreContract } from "./contract/event-store.js";
+import {
+  registerSnapshotStoreContract,
+  type SnapshotTestState,
+} from "./contract/snapshot-store.js";
 
 const TABLE_NAME = "minamo-contract-events";
+const SNAPSHOT_TABLE_NAME = "minamo-contract-snapshots";
 const ENDPOINT = "http://localhost:8000";
 
 const CLIENT_CONFIG: DynamoDBClientConfig = {
@@ -62,11 +67,27 @@ beforeAll(async () => {
       BillingMode: "PAY_PER_REQUEST",
     }),
   );
+
+  // Snapshot table: PK=aggregateId のみ (1 aggregate につき 1 snapshot を上書き)
+  try {
+    await control.send(new DeleteTableCommand({ TableName: SNAPSHOT_TABLE_NAME }));
+  } catch (err) {
+    if ((err as Error).name !== "ResourceNotFoundException") throw err;
+  }
+  await control.send(
+    new CreateTableCommand({
+      TableName: SNAPSHOT_TABLE_NAME,
+      KeySchema: [{ AttributeName: "aggregateId", KeyType: "HASH" }],
+      AttributeDefinitions: [{ AttributeName: "aggregateId", AttributeType: "S" }],
+      BillingMode: "PAY_PER_REQUEST",
+    }),
+  );
 });
 
 afterAll(async () => {
   if (!available) return;
   await control.send(new DeleteTableCommand({ TableName: TABLE_NAME }));
+  await control.send(new DeleteTableCommand({ TableName: SNAPSHOT_TABLE_NAME }));
   control.destroy();
 });
 
@@ -92,6 +113,20 @@ registerEventStoreContract({
   makeStore: async () =>
     new DynamoEventStore<CounterEvents>({
       tableName: TABLE_NAME,
+      clientConfig: CLIENT_CONFIG,
+    }),
+});
+
+/**
+ * CT-SS-01〜05 を DynamoSnapshotStore 対象で実行 (DEC-019)。
+ * snapshot は単一 item/aggregate を上書きするため、各 case の aggregateId が衝突しなければ
+ * store instance を共有しても干渉しない。
+ */
+registerSnapshotStoreContract({
+  label: "DynamoSnapshotStore (Local)",
+  makeStore: async () =>
+    new DynamoSnapshotStore<SnapshotTestState>({
+      tableName: SNAPSHOT_TABLE_NAME,
       clientConfig: CLIENT_CONFIG,
     }),
 });
