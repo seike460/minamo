@@ -2,6 +2,7 @@ node_modules/
 dist/
 docs/api/
 coverage/
+temp/
 *.tsbuildinfo
 .DS_Store
 .claude/

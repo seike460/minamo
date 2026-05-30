@@ -54,6 +54,9 @@ jobs:
       - name: Check exports (attw + publint)
         run: pnpm run check-exports
 
+      - name: Check API surface (api-extractor, fails on unreviewed drift)
+        run: pnpm run check-api
+
       - name: Generate API reference (typedoc, warnings-as-errors)
         run: pnpm run docs
 
