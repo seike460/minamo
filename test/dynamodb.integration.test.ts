@@ -92,7 +92,8 @@ afterAll(async () => {
 });
 
 describe("DynamoDB Local availability", () => {
-  it.skipIf(!available)("is reachable at http://localhost:8000", () => {
+  it("is reachable at http://localhost:8000", (ctx) => {
+    if (!available) ctx.skip();
     // the mere invocation of this test confirms beforeAll succeeded
   });
 });
