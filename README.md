@@ -15,7 +15,20 @@ minamo is a CQRS + Event Sourcing library for TypeScript / Node 24 / AWS SDK v3 
 - **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome
 - **MIT License**
 
-> Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim and is unchanged across the 0.1.x patch line.
+> Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim. The path to v1 is tracked in [`docs/roadmap-v1.md`](docs/roadmap-v1.md).
+
+---
+
+## Why minamo?
+
+Doing CQRS + Event Sourcing on **DynamoDB + Lambda + TypeScript**? The write side is where correctness is hardest — optimistic locking, retry-from-load, and keeping your tests honest against production. minamo solves exactly that, and nothing more:
+
+- **DynamoDB-first, not multi-DB.** `TransactWriteItems` + `ConsistentRead` are baked into the design, not hidden behind a portable adapter.
+- **Full-cycle retry as a core API.** `executeCommand` owns Load → Rehydrate → Decide → Append and retries the *whole cycle* on `ConcurrencyError` — the wiring hand-rolled implementations get wrong.
+- **InMemory ⇄ DynamoDB parity, guaranteed.** Both stores run the same Contract Tests, so your tests can't pass while production breaks.
+- **One runtime dependency.** AWS SDK v3 (optional peer). Minimal cold-start and dependency surface.
+
+Full comparison with castore and @ocoda/event-sourcing: [`docs/concept.md` §7](docs/concept.md). Not sure if you need CQRS+ES at all? §1–§2 of the concept doc help you decide.
 
 ---
 

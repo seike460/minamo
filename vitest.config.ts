@@ -15,8 +15,18 @@ export default defineConfig({
         "src/standard-schema.ts",
         "src/**/types.ts",
         "src/core/aggregate.ts",
+        "src/observability.ts",
       ],
       reporter: ["text", "json-summary", "html"],
+      // 後退を CI で検出する閾値 (DEC-024 / CTeO・COO 指摘)。
+      // unit-only 計測のため DynamoEventStore (event-store/dynamo/*) は低めに出る前提で、
+      // 現状値 (stmts 85 / branch 88 / func 90 / lines 85) に余裕を持たせた下限を設定する。
+      thresholds: {
+        statements: 78,
+        branches: 78,
+        functions: 82,
+        lines: 78,
+      },
     },
     projects: [
       {
