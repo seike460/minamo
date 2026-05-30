@@ -3,6 +3,7 @@
 [English](README.md) | **日本語**
 
 [![npm version](https://img.shields.io/npm/v/@seike460/minamo.svg)](https://www.npmjs.com/package/@seike460/minamo)
+[![CI](https://github.com/seike460/minamo/actions/workflows/ci.yml/badge.svg)](https://github.com/seike460/minamo/actions/workflows/ci.yml)
 [![Node.js ≥24](https://img.shields.io/node/v/@seike460/minamo)](package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -14,7 +15,7 @@ minamo は TypeScript / Node 24 / AWS SDK v3 を前提とした、薄く・厳�
 - **1 人メンテ** ([@seike460](https://github.com/seike460))。Pull Request 歓迎
 - **MIT License**
 
-> Status: v0.1.0 released on npm (`@seike460/minamo`)。API は [`docs/concept.md`](docs/concept.md) §5 に逐字従属します。
+> Status: npm (`@seike460/minamo`) で公開中（最新版は上記 npm バッジを参照）。公開 API は [`docs/concept.md`](docs/concept.md) §5 に逐字従属し、0.1.x patch 系列で不変です。
 
 ---
 

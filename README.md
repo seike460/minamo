@@ -3,6 +3,7 @@
 **English** | [日本語](README.ja.md)
 
 [![npm version](https://img.shields.io/npm/v/@seike460/minamo.svg)](https://www.npmjs.com/package/@seike460/minamo)
+[![CI](https://github.com/seike460/minamo/actions/workflows/ci.yml/badge.svg)](https://github.com/seike460/minamo/actions/workflows/ci.yml)
 [![Node.js ≥24](https://img.shields.io/node/v/@seike460/minamo)](package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -14,7 +15,7 @@ minamo is a CQRS + Event Sourcing library for TypeScript / Node 24 / AWS SDK v3 
 - **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome
 - **MIT License**
 
-> Status: v0.1.0 released on npm as `@seike460/minamo`. The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim.
+> Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim and is unchanged across the 0.1.x patch line.
 
 ---
 

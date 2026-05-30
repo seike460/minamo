@@ -44,6 +44,10 @@ pnpm run test:integration
 - Release PR merge → npm provenance 付きで publish (Trusted Publishing / OIDC)
 - `npm audit signatures` で post-publish smoke
 
+## Dependencies
+
+`dependabot.yml` が weekly で dev 依存と GitHub Actions の PR を grouping して作成する (semver-major は ignore)。CI が green であることを確認のうえ、滞留させずに週次でレビュー・マージする。
+
 ## Security
 
 脆弱性は GitHub Private Vulnerability Reporting で報告してください ([`SECURITY.md`](SECURITY.md))。
