@@ -12,7 +12,7 @@
 minamo is a CQRS + Event Sourcing library for TypeScript / Node 24 / AWS SDK v3 that stays thin, strict, and lets you write the write side in your domain's own words. It exposes exactly four public surfaces — Aggregate, Command, Event, and Projection Bridge — and never takes AWS primitives out of your hands.
 
 - **No SLA.** Production guarantees are the consumer's responsibility
-- **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome
+- **Single-maintainer** ([@seike460](https://github.com/seike460)). Pull requests welcome — see [`GOVERNANCE.md`](GOVERNANCE.md) for roles and the path to becoming a co-maintainer
 - **MIT License**
 
 > Status: published on npm as `@seike460/minamo` (see the npm badge above for the latest version). The public API follows [`docs/concept.md`](docs/concept.md) §5 verbatim. The path to v1 is tracked in [`docs/roadmap-v1.md`](docs/roadmap-v1.md).

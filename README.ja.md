@@ -12,7 +12,7 @@
 minamo は TypeScript / Node 24 / AWS SDK v3 を前提とした、薄く・厳しく・ドメインの言葉で書ける CQRS+ES ライブラリです。Aggregate / Command / Event / Projection Bridge の 4 つの公開 API だけを提供し、AWS プリミティブは consumer の手から取り上げません。
 
 - **SLA なし**。production 保証は consumer 責務です
-- **1 人メンテ** ([@seike460](https://github.com/seike460))。Pull Request 歓迎
+- **1 人メンテ** ([@seike460](https://github.com/seike460))。Pull Request 歓迎 — 役割と co-maintainer への道筋は [`GOVERNANCE.md`](GOVERNANCE.md) 参照
 - **MIT License**
 
 > Status: npm (`@seike460/minamo`) で公開中（最新版は上記 npm バッジを参照）。公開 API は [`docs/concept.md`](docs/concept.md) §5 に逐字従属します。v1 への道筋は [`docs/roadmap-v1.md`](docs/roadmap-v1.md) を参照。

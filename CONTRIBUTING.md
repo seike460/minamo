@@ -27,7 +27,7 @@ pnpm run check-api          # api-extractor: 公開 surface の差分検出
 DynamoDB Local を使う integration tests:
 
 ```bash
-docker compose up -d dynamodb
+docker compose up -d dynamodb-local
 pnpm run test:integration
 ```
 
@@ -38,6 +38,10 @@ pnpm run test:integration
 3. `pnpm changeset` で changeset を追加 (`minor` / `patch` を選択)
 4. PR を開く。CI (lint / type-check / unit + coverage / build / attw + publint / api-extractor / typedoc / integration / CodeQL) が全て green であること
 5. review → merge 後、`changesets/action` が Release PR を自動生成
+
+## Governance
+
+意思決定プロセス・役割（Contributor / Committer / Co-maintainer）・co-maintainer になる道筋は [`GOVERNANCE.md`](GOVERNANCE.md) を参照。1 人メンテの現状と継続性（bus factor / fork 権利）もそこで明示している。
 
 ## Releases
 
