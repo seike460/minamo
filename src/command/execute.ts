@@ -1,6 +1,6 @@
 import type { Aggregate, AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEventsOf } from "../core/types.js";
-import { ConcurrencyError, InvalidEventStreamError } from "../errors.js";
+import { ConcurrencyError, InvalidEventStreamError, RetryExhaustedError } from "../errors.js";
 import type { AppendOptions, EventStore } from "../event-store/types.js";
 import type { ExecuteObserver } from "../observability.js";
 import type { Snapshot, SnapshotPolicy, SnapshotStore } from "../snapshot/types.js";
@@ -302,6 +302,7 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
   }
 
   // retry 枯渇: 少なくとも 1 回 append を試行しているため lastConcurrency は非 null
-  observer?.onRetryExhausted?.({ aggregateId, attempts: maxRetries + 1 });
-  throw lastConcurrency as ConcurrencyError;
+  const attempts = maxRetries + 1;
+  observer?.onRetryExhausted?.({ aggregateId, attempts });
+  throw new RetryExhaustedError(aggregateId, attempts, lastConcurrency as ConcurrencyError);
 }

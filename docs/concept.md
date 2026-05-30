@@ -323,7 +323,7 @@ const prodStore = new DynamoEventStore<CounterEvents>({
 - `ConcurrencyError` 以外のエラーは再試行せず、その場で throw する。再試行後に最新 state で再 Decide した結果 handler が例外を throw するケースは、技術的競合（ConcurrencyError）ではなくドメインのバリデーション失敗であり、リトライ対象外である
 - handler の純粋性（DEC-005）により、同じ `aggregate` と `input` からは決定的にイベントが導出されるため、ConcurrencyError に対する技術的リトライは安全である
 - `maxRetries` が非負整数でない場合は `RangeError` を Load 前に throw する
-- `1 + maxRetries` 回の append 試行でも競合が解消しない場合は最後の `ConcurrencyError` をそのまま throw する
+- `1 + maxRetries` 回の append 試行でも競合が解消しない場合は `RetryExhaustedError`（`cause` に最後の `ConcurrencyError`、`attempts` に総試行回数）を throw する（v0.2.0+、DEC-022。v0.1.x は生の `ConcurrencyError`）
 - `handler` が空配列を返した場合は no-op 成功として終了し、`append` も再試行も行わない
 - `handler` は再試行で複数回実行されうるため、副作用を含めてはならない（DEC-005）。非決定的要素は `input` 経由で注入する（DEC-010）
 - v1 は即時リトライ。backoff / jitter は提供しない（DEC-012）。即時リトライは低競合 Aggregate を前提としており、高競合時（hot aggregate）は Aggregate 境界の見直し、呼び出し側での backoff / 同時実行抑制が必要。`ConcurrencyError` 発生率と retry exhaustion は監視対象とすべき

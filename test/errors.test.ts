@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  ConcurrencyError,
   EventLimitError,
   InvalidEventStreamError,
   InvalidStreamRecordError,
+  RetryExhaustedError,
 } from "../src/index.js";
 
 describe("EventLimitError", () => {
@@ -50,6 +52,21 @@ describe("InvalidEventStreamError", () => {
       const err = new InvalidEventStreamError("agg", reason, reason);
       expect(err.reason).toBe(reason);
     }
+  });
+});
+
+describe("RetryExhaustedError", () => {
+  it("wraps the last ConcurrencyError as cause and exposes attempts + aggregateId", () => {
+    const cause = new ConcurrencyError("agg-r", 7);
+    const err = new RetryExhaustedError("agg-r", 4, cause);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(RetryExhaustedError);
+    expect(err.name).toBe("RetryExhaustedError");
+    expect(err.aggregateId).toBe("agg-r");
+    expect(err.attempts).toBe(4);
+    expect(err.cause).toBe(cause);
+    expect(err.cause).toBeInstanceOf(ConcurrencyError);
+    expect(err.message).toMatch(/unresolved after 4 attempt/);
   });
 });
 

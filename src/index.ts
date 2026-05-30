@@ -20,6 +20,7 @@ export {
   EventLimitError,
   InvalidEventStreamError,
   InvalidStreamRecordError,
+  RetryExhaustedError,
   ValidationError,
 } from "./errors.js";
 export type { DynamoEventStoreConfig } from "./event-store/dynamo/index.js";
