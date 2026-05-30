@@ -415,6 +415,11 @@ export type Evolver<TState, TMap extends EventMap> = {
 export interface AggregateConfig<TState, TMap extends EventMap> {
   readonly initialState: ReadonlyDeep<TState>;
   readonly evolve: Evolver<TState, TMap>;
+  /**
+   * Optional: 永続化済みイベントを現行スキーマへ変換する upcasting hook（§5.11、DEC-020）。
+   * 未指定なら identity（変換なし）。rehydrate が evolve 適用前に各イベントへ適用する。
+   */
+  readonly upcast?: Upcaster<TMap>;
 }
 
 /** ハイドレーション済みの Aggregate: Load + Rehydrate の結果 */
@@ -508,6 +513,19 @@ export interface EventStore<TMap extends EventMap> {
    * - fresh read の実現方法は実装が責任を持つ
    */
   load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+
+  /**
+   * Optional: version が afterVersion より大きいイベントだけを昇順で読み込む（v0.2.0+、DEC-019）。
+   *
+   * - Snapshot からの部分 rehydration を効率化するための optional method
+   * - 実装しない store では executeCommand が load() 全件取得 + filter にフォールバックする
+   * - 返り値の各 version は afterVersion より大きく、昇順・連番
+   * - fresh read 保証は load() と同じ
+   */
+  loadFrom?(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 }
 
 /** append のオプション */
@@ -575,6 +593,24 @@ export declare class InvalidEventStreamError extends Error {
     details?: InvalidEventStreamDetails,
   );
 }
+
+/**
+ * executeCommand が 1 + maxRetries 回の append 試行でも ConcurrencyError を解消できなかったことを示す（DEC-022）。
+ *
+ * v0.1.x では retry 枯渇時に最後の ConcurrencyError をそのまま throw していたが、
+ * 試行回数情報が失われていた。v0.2.0 以降は RetryExhaustedError でラップし、
+ * `attempts`（総試行回数 = 1 + maxRetries）と `cause`（最後に観測した ConcurrencyError）を提供する。
+ */
+export declare class RetryExhaustedError extends Error {
+  readonly name: "RetryExhaustedError";
+  readonly aggregateId: string;
+  /** 実際に行った append 試行の総回数（= 1 + maxRetries）。 */
+  readonly attempts: number;
+  /** 最後に観測した ConcurrencyError（ES2022 error cause）。 */
+  readonly cause: ConcurrencyError;
+
+  constructor(aggregateId: string, attempts: number, cause: ConcurrencyError);
+}
 ```
 
 その他の DynamoDB / AWS SDK 起因のエラーはラップせず、そのまま伝播する。
@@ -627,7 +663,7 @@ export declare function rehydrate<TState, TMap extends EventMap>(
  * @param params.correlationId - オプション: 相関 ID
  *
  * @throws RangeError - maxRetries が非負整数でない場合（負数、小数、NaN、Infinity を含む）。Load 前に throw
- * @throws ConcurrencyError - 1 + maxRetries 回の append 試行でも競合が解消しない場合（最後の ConcurrencyError をそのまま throw）
+ * @throws RetryExhaustedError - 1 + maxRetries 回の append 試行でも競合が解消しない場合（v0.2.0+。`cause` に最後の ConcurrencyError、`attempts` に総試行回数。DEC-022）
  * @throws InvalidEventStreamError - store.load が返したイベント列が version / aggregateId / evolve 契約を満たさない場合
  * @throws handler が throw したエラーはそのまま伝播（再試行しない）
  */
@@ -638,11 +674,17 @@ export declare function executeCommand<
 >(params: {
   config: AggregateConfig<TState, TMap>;
   store: EventStore<TMap>;
-  handler: CommandHandler<TState, TMap, TInput>;
+  handler: CommandHandler<TState, TMap, NoInfer<TInput>>;
   aggregateId: string;
   input: TInput;
   maxRetries?: number;
   correlationId?: string;
+  /** Optional: 実行ライフサイクルの観測 hook（§5.12、DEC-021）。 */
+  observer?: ExecuteObserver;
+  /** Optional: Snapshot による rehydration 短縮（§5.10、DEC-019）。指定時のみ snapshot 経路を使う。 */
+  snapshotStore?: SnapshotStore<TState>;
+  /** Optional: append 成功後に snapshot を save する閾値ポリシー（snapshotStore 指定時のみ有効）。 */
+  snapshotPolicy?: SnapshotPolicy;
 }): Promise<{
   aggregate: Aggregate<TState>;
   newEvents: ReadonlyArray<StoredEventsOf<TMap>>;
@@ -958,6 +1000,160 @@ await executeCommand({ config, store, handler, aggregateId, input });
 - **validator 実装非依存**: Standard Schema v1 interface のみを受け取る。minamo は Zod / Valibot / ArkType に依存せず、peerDependencies を増やさない
 - **Non-Goals との整合**: projection payload の schema 検証を consumer 責務と定義した原理（§6 / DEC-013）を、CommandHandler 入力 validation にも適用する。minamo が提供するのは schema を "受け取る" 接点のみ
 
+### 5.10 Snapshot（v0.2.0+ / DEC-019）
+
+長寿命 Aggregate（イベント数が継続的に増加するケース）で rehydration コストを抑えるための optional 機構。`SnapshotStore` は EventStore とは独立した interface であり（DEC-006 の汎用性を守る）、`executeCommand` に渡したときのみ snapshot 経路が有効になる。閾値は consumer が `snapshotPolicy` で指定し、minamo は機構のみ提供する（実測閾値を強制しない）。
+
+```typescript
+/**
+ * Aggregate 状態の Snapshot。state は plain data（DEC-011）。
+ * version は snapshot に含まれる最後のイベントの version を表す。
+ */
+export interface Snapshot<TState> {
+  readonly aggregateId: string;
+  readonly version: number;
+  readonly state: TState;
+  /** snapshot 作成時の ISO 8601 UTC timestamp。 */
+  readonly timestamp: string;
+}
+
+/** Snapshot の永続化と読み込みの契約。EventStore とは独立（DEC-019）。 */
+export interface SnapshotStore<TState> {
+  /** aggregateId の最新 snapshot を返す。無ければ null。 */
+  load(aggregateId: string): Promise<Snapshot<TState> | null>;
+  /** snapshot を保存する（同一 aggregateId の既存 snapshot は上書きしてよい）。 */
+  save(snapshot: Snapshot<TState>): Promise<void>;
+}
+
+/** append 成功後に snapshot を save する閾値ポリシー。 */
+export interface SnapshotPolicy {
+  /** version がこの倍数を跨いだら save する（例: 100 なら version 100, 200, ... で save）。 */
+  readonly everyNEvents: number;
+}
+
+/** SnapshotStore のテスト用 in-memory 実装。 */
+export declare class InMemorySnapshotStore<TState> implements SnapshotStore<TState> {
+  load(aggregateId: string): Promise<Snapshot<TState> | null>;
+  save(snapshot: Snapshot<TState>): Promise<void>;
+  /** 全 snapshot をクリア（テスト専用）。 */
+  clear(): void;
+}
+
+/** DynamoSnapshotStore の設定。Event Store とは別テーブルを推奨（DEC-019）。 */
+export interface DynamoSnapshotStoreConfig {
+  readonly tableName: string;
+  readonly clientConfig?: DynamoDBClientConfig;
+  readonly client?: DynamoDBDocumentClient;
+}
+
+/**
+ * Amazon DynamoDB を backing store とする SnapshotStore 実装。
+ * テーブルスキーマ: PK = aggregateId(S)。単一 snapshot/aggregate を PutItem で上書きする。
+ */
+export declare class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
+  constructor(config: DynamoSnapshotStoreConfig);
+  load(aggregateId: string): Promise<Snapshot<TState> | null>;
+  save(snapshot: Snapshot<TState>): Promise<void>;
+}
+```
+
+### 5.11 Upcasting（v0.3.0+ / DEC-020）
+
+永続化済みイベントは不変（immutable）であるため、スキーマ進化には過去イベントを現行スキーマへ変換する upcasting が必要になる。minamo は **consumer 所有の transform 関数**を `AggregateConfig.upcast` で受け取り、`rehydrate` が evolve 適用前に各イベントへ適用する。minamo 自身は upcaster エンジン（version 管理・連鎖変換）を持たない（thin / DEC-020）。
+
+```typescript
+/**
+ * 永続化済みイベントを現行スキーマの StoredEvent へ変換する純関数（consumer 所有）。
+ *
+ * - rehydrate が version/aggregateId 検証の後、evolve/type 検証の前に各イベントへ適用する
+ * - 変換不要なイベントはそのまま返す（identity）
+ * - aggregateId / version / timestamp などのメタデータは保持すること
+ * - 決定的・副作用なしであること（rehydrate は複数回呼ばれうる）
+ */
+export type Upcaster<TMap extends EventMap> = (
+  raw: StoredEvent<string, unknown>,
+) => StoredEventsOf<TMap>;
+```
+
+`AggregateConfig.upcast`（§5.2）に渡す。未指定なら変換なし（identity）で v0.1.x と完全に後方互換。
+
+### 5.12 Observability hooks（v0.2.0+ / DEC-021）
+
+`executeCommand` の実行ライフサイクルを観測するための optional callback 群。全 callback は同期・戻り値なしで、`ConcurrencyError` 発生率・retry 枯渇・rehydration コストといった concept.md §8 が「監視を推奨」する指標を consumer の telemetry（OpenTelemetry 等）へ配線できる。minamo は特定の telemetry 実装に依存しない（C2 / DEC-021）。timing は consumer が hook の前後で計測する（決定性維持）。
+
+```typescript
+export interface ExecuteObserver {
+  /** 各試行（初回 + 各 retry）の開始時。attempt は 0 始まり。 */
+  onAttempt?(info: { readonly aggregateId: string; readonly attempt: number }): void;
+  /** load + rehydrate 完了時。eventCount は rehydration コストの proxy。 */
+  onLoaded?(info: {
+    readonly aggregateId: string;
+    readonly eventCount: number;
+    readonly version: number;
+  }): void;
+  /** append が ConcurrencyError で失敗したとき（retry の直前）。 */
+  onConcurrencyConflict?(info: {
+    readonly aggregateId: string;
+    readonly expectedVersion: number;
+    readonly attempt: number;
+  }): void;
+  /** append が成功し state が確定したとき。no-op command では呼ばれない。 */
+  onCommitted?(info: {
+    readonly aggregateId: string;
+    readonly newEventCount: number;
+    readonly version: number;
+  }): void;
+  /** 1 + maxRetries 回の試行でも競合が解消せず RetryExhaustedError を throw する直前。 */
+  onRetryExhausted?(info: { readonly aggregateId: string; readonly attempts: number }): void;
+}
+```
+
+### 5.13 Command Runner & EventStore Table（v0.2.0+ / DEC-023）
+
+consumer の boilerplate を削減する first-party ヘルパー。いずれも既存 API の薄いラッパーであり、公開契約を変えない。
+
+```typescript
+/**
+ * config / store を固定し、handler + aggregateId + input だけで呼べる runner を返す。
+ * defaults で maxRetries / observer / snapshotStore / snapshotPolicy の既定値を束ねられる
+ * （呼び出し時の引数が優先）。複数 handler を持つ Aggregate での重複を解消する。
+ */
+export declare function createCommandRunner<TState, TMap extends EventMap>(deps: {
+  config: AggregateConfig<TState, TMap>;
+  store: EventStore<TMap>;
+  defaults?: {
+    maxRetries?: number;
+    observer?: ExecuteObserver;
+    snapshotStore?: SnapshotStore<TState>;
+    snapshotPolicy?: SnapshotPolicy;
+  };
+}): <TInput>(args: {
+  handler: CommandHandler<TState, TMap, NoInfer<TInput>>;
+  aggregateId: string;
+  input: TInput;
+  maxRetries?: number;
+  correlationId?: string;
+  observer?: ExecuteObserver;
+}) => Promise<{
+  aggregate: Aggregate<TState>;
+  newEvents: ReadonlyArray<StoredEventsOf<TMap>>;
+}>;
+
+/**
+ * 1 つの DynamoDB テーブル（= 1 つの DocumentClient）を共有しつつ、
+ * Aggregate ごとに型を narrow した EventStore を発行する facade。
+ * `.for<TMap>()` は heterogeneous union ではなく単一 Aggregate の DynamoEventStore<TMap> を返す
+ * （per-Aggregate TMap narrowing を保持。DEC-023）。
+ */
+export interface EventStoreTable {
+  for<TMap extends EventMap>(): DynamoEventStore<TMap>;
+}
+
+export declare function createEventStoreTable(
+  config: DynamoEventStoreConfig,
+): EventStoreTable;
+```
+
 ---
 
 ## 6. Non-Goals
@@ -978,6 +1174,15 @@ await executeCommand({ config, store, handler, aggregateId, input });
 | **高度な event routing** | `parseStreamRecord` は type 名によるフィルタリングのみ提供する。aggregateId による振り分け、複数 Aggregate の合流、discriminator ベースの routing は利用者の責務。minamo は stream record の正規化までを担い、どの projector が処理すべきかの判定ロジックは提供しない |
 | **複数 DB 対応** | minamo の本番 EventStore 実装は DynamoEventStore のみ。他の DB への移植性は目標としない。EventStore interface は汎用だが、これはテスト用 InMemoryEventStore との契約一致が目的であり、DB ポータビリティのためではない |
 
+### v1 in-scope に昇格（DEC-018）
+
+以下は当初 v1 スコープ外（将来検討）だったが、16 CxO ラウンドテーブル診断（2026-05-30）の結果、**ES 実務で普遍的に必要となるため v1 in-scope に昇格**した。シーケンスと卒業条件は [`docs/roadmap-v1.md`](roadmap-v1.md)、詳細設計は DEC-018〜020 を参照。
+
+| 項目 | v1 での提供形態 | 関連 DEC |
+|------|---------------|---------|
+| **イベントスキーマ進化（upcasting）** | `AggregateConfig.upcast` — consumer 所有の transform hook。minamo は rehydrate 時の配線のみ担い、upcaster エンジンは持たない（thin 維持） | DEC-020 |
+| **Snapshot** | EventStore とは独立した `SnapshotStore<TState>` interface。閾値は consumer が `snapshotPolicy` で指定し、minamo は機構のみ提供（実測閾値を強制しない） | DEC-019 |
+
 ### 将来検討（v1 スコープ外）
 
 以下は v1 には含めないが、将来のバージョンで検討する可能性がある。
@@ -985,8 +1190,8 @@ await executeCommand({ config, store, handler, aggregateId, input });
 | 項目 | 検討条件 |
 |------|---------|
 | **Projection handler ヘルパー** | `parseStreamRecord` とバッチ反復、`ReportBatchItemFailures` 応答の定型化に需要が確認された場合。ただし Event Source Mapping 設定や DLQ 方針までは抽象化しない |
-| **Snapshot** | Aggregate のイベント数が 1,000 を超えるユースケースが確認された場合。実測データに基づいて判断 |
-| **イベントスキーマ進化（upcasting）** | minamo 自体の API が安定した後（v1.0.0 以降）に検討 |
+| **Global Tables 対応** | 単一リージョン前提（OQ-7）の緩和需要が確認された場合 |
+| **backoff / jitter retryStrategy** | 即時リトライ（DEC-012）の限界が実運用で確認された場合 |
 
 ### API Ergonomics（バックログ）
 
@@ -1115,6 +1320,50 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 - **判断:** `validate` helper と Standard Schema v1 interface / `ValidationError` を §5.9 Optional: Input Validation として仕様化する。特定の validator 実装（Zod / Valibot / ArkType 等）には依存せず、Standard Schema v1 interface のみを型として受け取る
 - **理由:** CommandHandler は同期・決定的・副作用なし（DEC-005）で、非決定的要素は `input` に注入する（DEC-010）。この結果、runtime validation は `executeCommand` の外（境界）で行い、検証済みの `input` を handler に渡す設計になる。Standard Schema v1 は Zod v3.24+ / Valibot v1 / ArkType v2 等が実装する validator の共通仕様（spec: https://standardschema.dev）であり、interface のみを受け取る形をとることで consumer の validator 選択を制約せず、型抽出（`InferSchemaOutput`）で CommandHandler の `TInput` に型安全に接続できる。§6 Non-Goals で projection payload の schema 検証を consumer 責務と定義した原理（DEC-013）を、CommandHandler 入力 validation にも適用する。minamo 側で実装する runtime コードは `validate` helper 1 本と `ValidationError` class のみで、「runtime 依存は AWS SDK のみ」原則（§4）も崩れない
 - **棄却した代替案:** (a) Zod / Valibot への直接依存 → 「runtime 依存は AWS SDK のみ」原則に反し、consumer の validator 選択を制約する（DEC-013 の data 型検証棄却と同じ論理） (b) minamo 独自の validator interface を新規定義 → エコシステム分断を招き、既存の Standard Schema 対応 validator の資産を活かせない (c) validation 機能を提供せず consumer が自前で wrap → 型抽出の接続点がなく、CommandHandler の `TInput` と schema の出力型を手で合わせる負担が残る。型安全性が minamo の価値の中核である以上、境界 helper を 1 本提供する価値は高い (d) CommandHandler 内部に async validate を内蔵 → sync handler 制約（DEC-005）に違反し、再試行時に毎回 validate が走るため冪等性と性能の両方を悪化させる
+
+### DEC-018: v1 スコープを「信頼性のため拡大」する — Snapshot / upcasting を in-scope に昇格
+
+- **指摘元:** 16 CxO ラウンドテーブル診断（2026-05-30）。CPO / CRO / CDO / CSO が「upcaster ゼロ・Snapshot ゼロの ES ライブラリは採用非推奨条件が長すぎ、実務で v1 と呼べない」と指摘
+- **判断:** v1 のスコープを拡大し、**イベントスキーマ進化（upcasting）と Snapshot を v1 in-scope に昇格**する。永久スコープ外（Read Model 管理 / Saga / CDK / EventBridge / 複数 DB）と設計姿勢（thin / strict / framework-free / AWS 非ラップ）は不変
+- **理由:** スキーマ進化と長寿命 Aggregate は ES 実務で普遍的に発生する。これらを欠いたまま v1 を凍結すると「採用非推奨条件」（§8）が実質的な利用障壁になる。ただし拡大は **hook / interface に留め実装エンジン化を避ける**ことで thin 原則と 1 人メンテの保守可能性を守る（DEC-019 / DEC-020）
+- **棄却した代替案:** (a) thin 死守で Snapshot/upcasting を post-v1 据え置き → ES 実務の壁が残り CPO/CRO の懸念が解消しない (b) @ocoda のように Read 側まで包括する → DEC-013/014 と矛盾し保守不能。CTO dissent（Snapshot は実測まで YAGNI）は「機構のみ提供・閾値を強制しない」（DEC-019）で折衷
+
+### DEC-019: Snapshot は EventStore と独立した SnapshotStore interface として提供する
+
+- **判断:** Snapshot は `SnapshotStore<TState>` という EventStore とは別の interface で提供する。`executeCommand` に渡したときのみ snapshot 経路が有効。閾値は consumer が `snapshotPolicy` で指定し、minamo は機構のみ提供する。部分ロードは `EventStore.loadFrom?`（optional method）で効率化し、未実装の store では full load + filter にフォールバックする
+- **理由:** EventStore interface に snapshot を混ぜると DEC-006 の汎用性（Contract Tests のための最小契約）を損なう。別 interface にすることで InMemory/Dynamo それぞれの SnapshotStore を独立して Contract Test でき、snapshot 不要な consumer は一切影響を受けない。`loadFrom?` を optional にすることで既存 EventStore 実装を壊さない（additive）
+- **棄却した代替案:** (a) EventStore.snapshot() を必須メソッド化 → 全 store 実装に強制、DEC-006 違反 (b) snapshot を DynamoEventStore 内部に隠蔽 → InMemory でテストできず §1 痛み C を再発させる
+
+### DEC-020: upcasting は consumer 所有の transform hook として提供する
+
+- **判断:** `AggregateConfig.upcast?: Upcaster<TMap>` で consumer 所有の変換関数を受け取り、`rehydrate` が version/aggregateId 検証の後・evolve/type 検証の前に各イベントへ適用する。minamo は upcaster エンジン（version 管理・連鎖変換・registry）を持たない
+- **理由:** 「AWS プリミティブをラップしない」（DEC-014）と同じ思想。スキーマ進化のロジックはドメイン固有であり、汎用エンジンは過剰抽象化かつ保守負債になる。minamo は配線（適用順序の保証）だけを担い、変換の中身は consumer に委ねる。未指定なら identity で v0.1.x と完全後方互換
+- **棄却した代替案:** (a) version 付き upcaster registry を内蔵 → グローバル状態と保守負債（DEC-009 と同型の棄却理由） (b) projection 側で upcast → rehydrate（Write 側の状態復元）には効かない。upcast は rehydrate の責務
+
+### DEC-021: Observability は OTel 非依存の optional callback hook で提供する
+
+- **判断:** `executeCommand` に `observer?: ExecuteObserver`（全 callback optional・同期・戻り値なし）を追加する。OpenTelemetry 等の特定実装には依存せず、consumer が hook を自身の telemetry に配線する。timing は consumer が hook 前後で計測する
+- **理由:** §8 が「`ConcurrencyError` 発生率・retry 枯渇・`IteratorAge` の監視を推奨」と書きながら、それを emit する hook が無いのは矛盾。OTel に runtime 依存すると C2（runtime dep は AWS SDK のみ）に反する。callback hook は thin で、library 自身が telemetry を所有しない
+- **棄却した代替案:** (a) `@opentelemetry/api` を peer dep に → C2 違反、consumer の OTel 選択を制約 (b) library 内で span を張る → DEC-014 と同型（プリミティブをラップしない）
+
+### DEC-022: retry 枯渇時は RetryExhaustedError でラップする（v0.1.0 の生 ConcurrencyError throw を supersede）
+
+- **指摘元:** CTeO / CRO 診断。design doc `00-constraints-and-risks.md` R13 が `RetryExhaustedError { cause, attempts }` を設計していたが、v0.1.0 実装は concept.md §5.6 通り生の `ConcurrencyError` を throw し、試行回数情報を喪失していた
+- **判断:** retry 枯渇時に `RetryExhaustedError`（`attempts` = 総試行回数、`cause` = 最後の ConcurrencyError）を throw する。0.x の breaking change だが §12 方針通り 1 リリース deprecation を経る
+- **理由:** 運用時に「1 回の衝突」と「枯渇」を区別できず、retry exhaustion の監視（§8 推奨）ができなかった。`cause`（ES2022）で根本原因を保持しつつ、`attempts` で枯渇を明示する。R13 設計を実装に一致させる
+- **棄却した代替案:** (a) 生 ConcurrencyError のまま維持 → 試行回数を失い observability が成立しない (b) ConcurrencyError に attempts を後付け → 「1 回の衝突」と「枯渇」が同型になり区別不能
+
+### DEC-023: createCommandRunner / createEventStoreTable を first-party 化する
+
+- **判断:** `examples/projected-event-store/command-runner.ts` の recipe を `createCommandRunner` として、roadmap.md 検討中だった facade を `createEventStoreTable` として first-party 化する。facade の `.for<TMap>()` は heterogeneous union ではなく単一 Aggregate の `DynamoEventStore<TMap>` を返し、per-Aggregate `TMap` narrowing を保持する
+- **理由:** 11 Aggregate を 1 テーブルで運用する production 利用で store 構築の boilerplate が DX の崖になっている（CXO/CPO 診断）。いずれも既存 API の薄いラッパーで公開契約を変えない
+- **棄却した代替案:** (a) recipe のまま据え置き → DX の崖が残る (b) facade が `EventStore<Union>` を返す → 単一ストリーム不変条件（rehydrate が依存）を破壊する。CFO/CTO dissent に応え、`expectTypeOf` 型テストで narrowing 保持を gate する
+
+### DEC-024: API Extractor gate 導入と「3 マイナー安定」の additive 解釈
+
+- **判断:** `@microsoft/api-extractor` で公開 surface のレポート（`etc/minamo.api.md`）を生成・commit し、CI で差分を検出する gate を導入する。§12 の「公開 API が 3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」**（additive な追加は安定性と矛盾しない）と解釈する
+- **理由:** §12 の安定性の約束は、これまで「concept.md §5 逐字一致」という手作業の規律に依存していた。API Extractor で機械的に強制することで、意図しない surface 変更を CI で検出する。また「3 マイナー安定 vs 機能追加=マイナー」の自己矛盾（CEO/CPO 診断）を additive 解釈で解消する
+- **棄却した代替案:** (a) 手作業の逐字一致のみ継続 → human error で surface drift が起きうる (b) 「3 マイナー一切変更なし」と厳格解釈 → 機能追加（=マイナー）が一切できず v1 に到達不能
 
 ---
 
@@ -1470,8 +1719,8 @@ concept.md 構築過程で浮上した未解決の論点。全件を「v1 リリ
 
 | # | 質問 | 起源 | 現在の仮説 | 解決条件 | v1 スコープ |
 |---|------|------|-----------|---------|------------|
-| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | v1 スコープ外。v1 は Snapshot なし。閾値特定は実測データが前提 |
-| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | minamo の公開 API が安定し（v1.0.0 以降）、upcasting の需要が確認された場合 | v1 スコープ外。API 安定が前提条件 |
+| OQ-1 | Snapshot の導入閾値はイベント何件からか | §3 Query 1MB 上限、§6 将来検討、§8 Rehydration リスク | イベント数 × ペイロードサイズが Lambda の timeout / memorySize に対して問題になる閾値は未確定 | v1 リリース後の実運用データで Rehydration レイテンシーを実測し、閾値を特定する | **v1 in-scope（DEC-018/019）。** minamo は SnapshotStore 機構を v0.4.0 で提供し、閾値は consumer が `snapshotPolicy` で指定する。実測閾値は強制しない（CTO dissent への折衷） |
+| OQ-2 | イベントスキーマ進化（upcasting）の最小実装はどうあるべきか | §3 CQRS+ES 制約、§6 将来検討、§8 Event schema evolution リスク | `evolve` 関数内での defensive coding（optional field / default value）が v1 の現実的な対策。ライブラリとしての upcaster は API 安定後に検討 | CxO 診断（2026-05-30）で ES 実務での普遍的需要を確認 | **v1 in-scope（DEC-018/020）。** v0.3.0 で `AggregateConfig.upcast` hook（consumer 所有の transform）として提供 |
 | OQ-3 | DynamoDB Streams の伝播レイテンシーの定量値 | §3 Streams 保持期間、§8 結果整合性リスク | 通常は数百ミリ秒〜数秒だが、AWS は公式 SLA を提供していない | AWS が公式に伝播レイテンシーの SLA を公開するか、実測データで十分な統計が得られた場合 | v1 スコープ外。minamo のコードに影響しない。ドキュメントで「公式 SLA なし」を注記 |
 | ~~OQ-4~~ | ~~複数 Aggregate 共有テーブルでの event type 衝突のベストプラクティス~~ | §5.7 shared table、DEC-009 | — | — | **解決済み。** DEC-009 で命名ポリシーを決定。ドキュメント作成は実装フェーズのタスク |
 | OQ-5 | executeCommand の backoff strategy の将来設計 | DEC-012 即時リトライ、§7 backoff 棄却 | `retryStrategy?: (attempt: number) => Promise<void>` をオプションとして追加する余地を残す。v1 は即時リトライ | 実運用で即時リトライの限界が確認された場合 | v1 スコープ外。v1 は即時リトライのまま |
