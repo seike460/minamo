@@ -6,23 +6,23 @@ minamo を v1.0.0 に到達させるためのシーケンス計画。本書は 2
 
 ---
 
-## 1. 現在地（2026-05-30）
+## 1. 現在地（2026-06-03 更新）
 
-- npm `@seike460/minamo` v0.1.6 公開済み。公開 API は concept.md §5 に逐字従属し 0.1.x line で凍結。
-- 品質指標: `src 1339 / test 4204 LOC`（3:1）、TODO/FIXME ゼロ、DEC-001〜015 全文書化。
-- CI: biome / type-check / unit+v8 coverage / tsdown build / instanceof 不変条件 / attw+publint / typedoc(warnings-as-errors) / DynamoDB Local 統合 / CodeQL。
+- npm `@seike460/minamo` v0.2.0 公開済み。v1 機能群（U10〜U18: observability hooks / `createCommandRunner` / `createEventStoreTable` / `RetryExhaustedError` / upcasting / `SnapshotStore` / `EventStore.loadFrom` / executeCommand snapshot 統合）を単一 v0.2.0 で一括導入済み（DEC-025）。公開 API は concept.md §5 に逐字従属。
+- 品質指標: `src 1903 / test 3034 LOC`、TODO/FIXME ゼロ、DEC-001〜025 全文書化。
+- CI: biome / type-check / unit+v8 coverage / tsdown build / instanceof 不変条件 / attw+publint / API Extractor gate / typedoc(warnings-as-errors) / DynamoDB Local 統合 / CodeQL。
 - リリース: changesets + npm provenance（Trusted Publishing / OIDC）。
 
-**結論:** 宣言されたスコープ（CQRS+ES の Write 側）に対しては機能完成している。v1 を阻むのは「壊れた箇所」ではなく、①人・普及・継続性の未成熟、②ES 実務に対する機能不足（upcasting / Snapshot 欠落）の 2 点。
+**結論:** 宣言されたスコープ（CQRS+ES の Write 側）と v1 in-scope の ES 実務機能（upcasting / Snapshot）はいずれも実装完成している（v0.2.0）。残る v1.0.0 への障壁は「壊れた箇所」ではなく ①人・普及・継続性の未成熟（bus factor=1 / 外部採用 / co-maintainer）であり、これは非コードの卒業条件（§5）として扱う。
 
-## 2. 現状評価（2026-05-30）
+## 2. 現状評価（2026-06-03 更新）
 
-v1 を阻むのは「壊れた箇所」ではなく、次の 2 つの未成熟である:
+v1 を阻むのは「壊れた箇所」ではない。当初指摘された 2 つの未成熟のうち機能面は v0.2.0 で解消し、残るのは人・普及・継続性の 1 点である:
 
-- **人・普及・継続性（最も重い）** — bus factor=1、コミュニティ未形成、ポジショニングが市場で埋もれている。
-- **ES 実務に対する機能不足** — 長寿命 Aggregate / 頻繁なスキーマ変更に対する upcasting・Snapshot の欠落。
+- **人・普及・継続性（最も重い・残課題）** — bus factor=1、コミュニティ未形成、ポジショニングが市場で埋もれている。
+- ~~ES 実務に対する機能不足~~ — **v0.2.0 で解消済み**。長寿命 Aggregate（`SnapshotStore`）/ 頻繁なスキーマ変更（`AggregateConfig.upcast`）に対応（DEC-018〜020）。
 
-一方、設計の芯・知識資産（DEC / design docs）・テスト（Contract Tests・約 3:1 の test 比）は既に v1 水準にある。supply chain（provenance / OIDC）と DX も良好で、残る懸念は保守時間予算と運用並走の持続性。
+一方、設計の芯・知識資産（DEC / design docs）・テスト（InMemory/Dynamo 両対応の Contract Tests）は既に v1 水準にある。supply chain（provenance / OIDC）と DX も良好で、残る懸念は保守時間予算と運用並走の持続性。
 
 **横断テーマ:** コードは v1 級だが、プロジェクトとしての v1（採用実績・継続性・普及）が未成熟。
 
@@ -55,7 +55,7 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 
 | 版 | 役割 |
 |---|---|
-| **v0.2.0** | v1 機能を一括導入（上表） |
+| **v0.2.0** | v1 機能を一括導入（上表）— **公開済み（実装完了）** |
 | **v0.3.0** | 安定性実証窓（既存 surface 非破壊）。post-v1 候補（OQ-5 backoff/jitter・`ExecuteObserver` の OTel 配線 helper 等）または保守リリースが入りうる |
 | **v0.4.0** | 安定性実証窓（同上） |
 | **v1.0.0** | 凍結（新規機能なし。API 凍結と保証の明文化）。§5 卒業条件を全充足 |
@@ -65,7 +65,7 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 §12 の「3 マイナーリリース以上安定」は **「既存 surface への breaking change なしで 3 マイナーを積む」** と解釈する（additive 追加は安定性と矛盾しない。DEC-024）。v1 機能は単一 v0.2.0 で一括導入し、以後の v0.2 → v0.3 → v0.4 を安定性の実証窓とする（DEC-025）。
 
 - [ ] v1 in-scope の Open Questions が全解決（OQ-1 Snapshot / OQ-2 upcasting は v0.2.0 で決着）
-- [ ] **v0.2.0 で v1 機能を一括導入し、v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積む**
+- [ ] **v0.2.0 で v1 機能を一括導入（実装完了）**。v0.2 → v0.3 → v0.4 の 3 マイナーを既存 surface 非破壊で積む（実証中）
 - [ ] API Extractor gate が CI で稼働し、surface 差分が常にレビューされる
 - [ ] **外部本番採用 ≥1 件、または実質的な公開ケーススタディ 3 件**（dog-fooding 1 件のみでは不十分）
 - [ ] **co-maintainer ≥1 名の獲得**（bus factor=1 の解消）
@@ -97,4 +97,4 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 
 ---
 
-Last reviewed: 2026-05-30（v1 設計レビューに基づき新規作成）。
+Last reviewed: 2026-06-03（v0.2.0 公開を反映し §1 現在地・§2 現状評価・§4/§5 を更新）。

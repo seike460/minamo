@@ -1198,7 +1198,7 @@ export declare function createEventStoreTable(
 Non-Goals ではなく、API の利便性改善として将来追加を検討するもの。
 
 - `defineAggregate` — EventMap を evolve から推論する型ヘルパー
-- `createCommandExecutor` — config + store をバインドするファクトリー
+- ~~`createCommandExecutor` — config + store をバインドするファクトリー~~ → v0.2.0 で `createCommandRunner` として出荷済み（§5.13 / DEC-023）
 
 ---
 
