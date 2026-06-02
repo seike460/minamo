@@ -39,7 +39,7 @@ export interface SnapshotStore<TState> {
 /**
  * append 成功後に snapshot を save するかを決める閾値ポリシー。
  *
- * minamo は閾値を強制せず、consumer が指定した policy に従うだけ (DEC-019, CTO dissent への折衷)。
+ * minamo は閾値を強制せず、consumer が指定した policy に従うだけ (DEC-019: 実測閾値を強制しない YAGNI 折衷)。
  */
 export interface SnapshotPolicy {
   /**
