@@ -63,6 +63,22 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     return [...events] as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 
+  /**
+   * version が `afterVersion` より大きいイベントだけを昇順で返す (concept.md §5.4, DEC-019)。
+   *
+   * DynamoEventStore.loadFrom (`version > :v` query) と同一セマンティクスを実装し、
+   * Snapshot からの部分 rehydration を InMemory でも本番と同じ振る舞いで検証できるようにする
+   * (Contract Test CT-14 / 痛み C)。`#streams` は append 順 = version 昇順なので追加ソートは不要。
+   */
+  async loadFrom(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    const events = this.#streams.get(aggregateId);
+    if (events === undefined) return [];
+    return events.filter((e) => e.version > afterVersion) as ReadonlyArray<StoredEventsOf<TMap>>;
+  }
+
   /** 全ストリームの全イベントを insertion order で返す (テスト専用)。 */
   allEvents(): ReadonlyArray<StoredEventsOf<TMap>> {
     return [...this.#insertionOrder] as ReadonlyArray<StoredEventsOf<TMap>>;

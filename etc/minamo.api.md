@@ -200,6 +200,7 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     clear(): void;
     // (undocumented)
     load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+    loadFrom(aggregateId: string, afterVersion: number): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 }
 
 // @public
