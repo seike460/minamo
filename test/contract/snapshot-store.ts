@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { SnapshotStore } from "../../src/index.js";
 
 /**
@@ -16,12 +16,24 @@ export type SnapshotTestState = { count: number; tags: string[] };
 export interface SnapshotContractContext {
   readonly label: string;
   readonly makeStore: () => Promise<SnapshotStore<SnapshotTestState>>;
+  /**
+   * 各 test 実行前に評価する可用性判定。`false` を返したら test を skip する。
+   * DynamoDB Local 等の外部依存が無い環境で contract suite が red にならないようにする。
+   */
+  readonly isAvailable?: () => boolean;
 }
 
 export function registerSnapshotStoreContract(ctx: SnapshotContractContext): void {
   const { label, makeStore } = ctx;
 
   describe(`${label} — SnapshotStore Contract`, () => {
+    beforeEach((testCtx) => {
+      // backend が到達不能な環境では red ではなく skip に倒す
+      if (ctx.isAvailable !== undefined && !ctx.isAvailable()) {
+        testCtx.skip();
+      }
+    });
+
     it("CT-SS-01 load on a missing aggregate returns null", async () => {
       const store = await makeStore();
       expect(await store.load("ss-missing")).toBeNull();

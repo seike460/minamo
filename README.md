@@ -122,7 +122,9 @@ const accepted = eventNamesOf(counter); // ["Incremented"]
 export const handler = async (event: { Records: unknown[] }) => {
   for (const record of event.Records) {
     const stored = parseStreamRecord<CounterEvents>(record, accepted);
-    if (stored === null) continue; // MODIFY / REMOVE / unregistered type is skipped safely
+    if (stored === null) continue; // MODIFY / REMOVE records are skipped
+    // Unregistered event types throw InvalidStreamRecordError (strict by default);
+    // pass { ignoreUnknownTypes: true } to skip them instead
     // consumer updates the Read Model
     await updateReadModel(stored);
   }

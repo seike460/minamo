@@ -1,7 +1,7 @@
-import { unmarshall } from "@aws-sdk/util-dynamodb";
 import type { AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEvent } from "../core/types.js";
 import { InvalidStreamRecordError } from "../errors.js";
+import { requirePeer } from "../internal/require-peer.js";
 
 /** `parseStreamRecord` の optional な挙動切替。 */
 export interface ParseStreamRecordOptions {
@@ -52,6 +52,11 @@ export function parseStreamRecord<
       "dynamodb.NewImage",
     );
   }
+
+  // `@aws-sdk/util-dynamodb` は optional peer のため利用時点で遅延解決する (DEC-027)。
+  // SDK 不在環境でも `import "minamo"` 自体は成功する。
+  const { unmarshall } =
+    requirePeer<typeof import("@aws-sdk/util-dynamodb")>("@aws-sdk/util-dynamodb");
 
   let item: Record<string, unknown>;
   try {

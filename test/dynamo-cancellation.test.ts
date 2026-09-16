@@ -52,6 +52,34 @@ describe("DynamoEventStore TransactionCanceledException mapping", () => {
     }
   });
 
+  it("maps by name even when instanceof fails (SDK 二重インスタンス / pnpm link)", async () => {
+    // consumer 持参 client が別コピーの SDK の exception を投げるケース:
+    // instanceof TransactionCanceledException は false だが name が一致する。
+    const foreignException = Object.assign(new Error("Transaction cancelled"), {
+      name: "TransactionCanceledException",
+      CancellationReasons: [{ Code: "ConditionalCheckFailed" }],
+    });
+    const { store } = makeStore(async () => {
+      throw foreignException;
+    });
+    await expect(
+      store.append("agg-x", [{ type: "Incremented", data: { amount: 1 } }], 3),
+    ).rejects.toBeInstanceOf(ConcurrencyError);
+  });
+
+  it("name match でも CancellationReasons が無ければ透過する", async () => {
+    const foreignException = Object.assign(new Error("Transaction cancelled"), {
+      name: "TransactionCanceledException",
+      // CancellationReasons なし → ConditionalCheckFailed ではない
+    });
+    const { store } = makeStore(async () => {
+      throw foreignException;
+    });
+    await expect(
+      store.append("agg-x", [{ type: "Incremented", data: { amount: 1 } }], 3),
+    ).rejects.toBe(foreignException);
+  });
+
   it("does not map when no CancellationReason is ConditionalCheckFailed", async () => {
     const { store } = makeStore(async () => {
       throw newCanceledException(["TransactionConflict"]);

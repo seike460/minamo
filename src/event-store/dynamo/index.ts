@@ -1,14 +1,32 @@
-import { TransactionCanceledException } from "@aws-sdk/client-dynamodb";
-import {
-  type DynamoDBDocumentClient,
-  QueryCommand,
-  TransactWriteCommand,
-} from "@aws-sdk/lib-dynamodb";
+import type { DynamoDBDocumentClient, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import type { EventMap, EventsOf, StoredEvent, StoredEventsOf } from "../../core/types.js";
 import { ConcurrencyError, EventLimitError } from "../../errors.js";
+import { requirePeer } from "../../internal/require-peer.js";
 import type { AppendOptions, EventStore } from "../types.js";
 import { type DynamoEventStoreConfig, resolveDocumentClient } from "./client.js";
 import { approxItemSize, fromItem, toItem } from "./marshaller.js";
+
+/** `@aws-sdk/lib-dynamodb` を遅延解決する (optional peer / DEC-027)。 */
+function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
+  return requirePeer("@aws-sdk/lib-dynamodb");
+}
+
+/**
+ * `err` が `TransactionCanceledException` かを name + instanceof の双方で判定する。
+ * `@aws-sdk/client-dynamodb` が解決不能 (mock client 持参かつ SDK 未 install)
+ * のとき instanceof 側は false に倒し、元の error をマスクしない。
+ */
+function isTransactionCanceledException(err: unknown): boolean {
+  if ((err as Error | undefined)?.name === "TransactionCanceledException") return true;
+  try {
+    const { TransactionCanceledException } = requirePeer<typeof import("@aws-sdk/client-dynamodb")>(
+      "@aws-sdk/client-dynamodb",
+    );
+    return err instanceof TransactionCanceledException;
+  } catch {
+    return false;
+  }
+}
 
 /** TransactWriteItems の 100 actions 上限 − ConditionCheck 1 ops 余地 (R15 / C12)。 */
 const MAX_EVENTS_PER_APPEND = 99;
@@ -58,6 +76,12 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     expectedVersion: number,
     options?: AppendOptions,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw new EventLimitError(
+        aggregateId,
+        `expectedVersion must be a non-negative integer (got ${String(expectedVersion)})`,
+      );
+    }
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
@@ -125,12 +149,19 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       });
     }
 
+    const { TransactWriteCommand: TransactWrite } = libDynamodb();
     try {
-      await this.#doc.send(new TransactWriteCommand({ TransactItems: transactItems }));
+      await this.#doc.send(new TransactWrite({ TransactItems: transactItems }));
     } catch (err) {
+      // instanceof だけでなく name でも判定する: consumer 持参の client が別コピーの
+      // SDK から来た場合 (pnpm link / npm link の二重インスタンス、pitfalls §5)、
+      // instanceof は false になるが構造は同じため name で拾う。
+      const reasons = (
+        err as { CancellationReasons?: ReadonlyArray<{ Code?: string }> } | undefined
+      )?.CancellationReasons;
       if (
-        err instanceof TransactionCanceledException &&
-        err.CancellationReasons?.some((r) => r.Code === "ConditionalCheckFailed")
+        isTransactionCanceledException(err) &&
+        reasons?.some((r) => r.Code === "ConditionalCheckFailed")
       ) {
         throw new ConcurrencyError(aggregateId, expectedVersion);
       }
@@ -166,6 +197,7 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
+    const { QueryCommand } = libDynamodb();
     do {
       const result = await this.#doc.send(
         new QueryCommand({

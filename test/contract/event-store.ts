@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { EventMap, EventStore } from "../../src/index.js";
 import { ConcurrencyError, EventLimitError } from "../../src/index.js";
 
 /**
- * Event Store Contract Tests (CT-01 〜 CT-13)。
+ * Event Store Contract Tests (CT-01 〜 CT-16)。
  *
  * 単一 suite を InMemoryEventStore と DynamoEventStore の両方で実行し、
  * concept.md §1 痛み C (InMemory と本番の振る舞い差異) を構造的に抑え込む。
@@ -24,6 +24,11 @@ export type CounterEvents = {
 export interface ContractContext<TMap extends EventMap> {
   readonly label: string;
   readonly makeStore: () => Promise<EventStore<TMap>>;
+  /**
+   * 各 test 実行前に評価する可用性判定。`false` を返したら test を skip する。
+   * DynamoDB Local 等の外部依存が無い環境で contract suite が red にならないようにする。
+   */
+  readonly isAvailable?: () => boolean;
 }
 
 /**
@@ -36,6 +41,13 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
   const { label, makeStore } = ctx;
 
   describe(`${label} — Contract Tests`, () => {
+    beforeEach((testCtx) => {
+      // backend が到達不能な環境では red ではなく skip に倒す
+      if (ctx.isAvailable !== undefined && !ctx.isAvailable()) {
+        testCtx.skip();
+      }
+    });
+
     it("CT-01 load on an empty stream returns []", async () => {
       const store = await makeStore();
       const events = await store.load("agg-01");
@@ -196,7 +208,9 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
 
     it("CT-14 loadFrom returns only events after the given version (when supported)", async () => {
       const store = await makeStore();
-      // loadFrom は optional method (DEC-019)。未実装の store はこの契約の対象外。
+      // loadFrom は optional method (DEC-019)。組み込み両実装は提供するため、
+      // 未実装のまま黙って pass しないよう存在自体も assert する。
+      expect(store.loadFrom).toBeTypeOf("function");
       if (typeof store.loadFrom !== "function") return;
       const aggregateId = "agg-14";
       await store.append(
@@ -212,5 +226,28 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       expect((await store.loadFrom(aggregateId, 1)).map((e) => e.version)).toEqual([2, 3]);
       expect((await store.loadFrom(aggregateId, 3)).map((e) => e.version)).toEqual([]);
     });
+
+    it("CT-15 mutation isolation: caller 側の変更が stored event に及ばない", async () => {
+      const store = await makeStore();
+      const aggregateId = "agg-15";
+      const data = { amount: 5 };
+      await store.append(aggregateId, [{ type: "Incremented", data }], 0);
+      // append に渡したオブジェクトを caller 側で改変 → stored event に影響しないこと
+      data.amount = 999;
+      expect((await store.load(aggregateId))[0]?.data).toEqual({ amount: 5 });
+      // load 結果を改変しても再 load で元の値が返ること (live 参照を共有しない)
+      const loaded = await store.load(aggregateId);
+      (loaded[0]?.data as { amount: number }).amount = -1;
+      expect((await store.load(aggregateId))[0]?.data).toEqual({ amount: 5 });
+    });
+
+    for (const badVersion of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY] as const) {
+      it(`CT-16 expectedVersion=${String(badVersion)} (非負整数でない) → EventLimitError`, async () => {
+        const store = await makeStore();
+        await expect(
+          store.append("agg-16", [{ type: "Incremented", data: { amount: 1 } }], badVersion),
+        ).rejects.toBeInstanceOf(EventLimitError);
+      });
+    }
   });
 }

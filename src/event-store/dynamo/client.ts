@@ -1,5 +1,6 @@
-import { DynamoDBClient, type DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { requirePeer } from "../../internal/require-peer.js";
 
 /**
  * U8 DynamoEventStore の constructor config。concept.md §5.8 逐字。
@@ -54,6 +55,13 @@ const RECOMMENDED_UNMARSHALL_OPTIONS = {
 export function resolveDocumentClient(config: DynamoEventStoreConfig): DynamoDBDocumentClient {
   if (config.client !== undefined) return config.client;
 
+  // AWS SDK は optional peer のため遅延解決する (DEC-027)。
+  // `config.client` 持参の consumer は SDK import を一切必要としない。
+  const { DynamoDBClient } = requirePeer<typeof import("@aws-sdk/client-dynamodb")>(
+    "@aws-sdk/client-dynamodb",
+  );
+  const { DynamoDBDocumentClient } =
+    requirePeer<typeof import("@aws-sdk/lib-dynamodb")>("@aws-sdk/lib-dynamodb");
   const raw = new DynamoDBClient(config.clientConfig ?? {});
   return DynamoDBDocumentClient.from(raw, {
     marshallOptions: RECOMMENDED_MARSHALL_OPTIONS,

@@ -1,7 +1,13 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
-import { type DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { requirePeer } from "../../internal/require-peer.js";
 import type { Snapshot, SnapshotStore } from "../../snapshot/types.js";
 import { resolveDocumentClient } from "./client.js";
+
+/** `@aws-sdk/lib-dynamodb` を遅延解決する (optional peer / DEC-027)。 */
+function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
+  return requirePeer("@aws-sdk/lib-dynamodb");
+}
 
 /**
  * DynamoDB から取得した item を `Snapshot<TState>` に復元する際の最小 envelope 検証 (DEC-026)。
@@ -75,6 +81,7 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   }
 
   async load(aggregateId: string): Promise<Snapshot<TState> | null> {
+    const { GetCommand } = libDynamodb();
     const result = await this.#doc.send(
       new GetCommand({
         TableName: this.#tableName,
@@ -87,6 +94,7 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   }
 
   async save(snapshot: Snapshot<TState>): Promise<void> {
+    const { PutCommand } = libDynamodb();
     await this.#doc.send(
       new PutCommand({
         TableName: this.#tableName,

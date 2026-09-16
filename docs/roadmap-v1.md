@@ -48,7 +48,7 @@ v1 は **DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安全か
 |---|---|---|
 | DX + 観測性の土台 | `createCommandRunner` / `createEventStoreTable` facade / `ExecuteObserver` hooks / `NoInfer<TInput>` / API Extractor gate / coverage 閾値 / README pitch | 既存 surface 非破壊・API gate 稼働・facade の TMap narrowing 型テスト pass |
 | retry 観測性 | `RetryExhaustedError { cause, attempts }`（旧: 生 ConcurrencyError throw を deprecation） | instanceof 検証 / 既存 retry テスト更新 / R13 設計-実装乖離の解消 |
-| スキーマ進化 | `AggregateConfig.upcast` hook（`Upcaster<TMap>`） | rehydrate が upcast → 検証 → evolve 順で動作・upcast 未指定は非破壊 |
+| スキーマ進化 | `AggregateConfig.upcast` hook（`Upcaster<TMap>`） | rehydrate が raw の aggregateId/version 検証 → upcast → evolve/type 検証の順で動作（DEC-020）・upcast 未指定は非破壊 |
 | 長寿命 Aggregate | `SnapshotStore` / `InMemorySnapshotStore` / `DynamoSnapshotStore` / `EventStore.loadFrom?` / `executeCommand` snapshot 統合 | Snapshot Contract Test が InMemory/Dynamo 両方 green・rehydration コスト削減を assert |
 
 **リリースシーケンス（安定性実証窓）:**

@@ -99,7 +99,7 @@ describe("DynamoDB Local availability", () => {
 });
 
 /**
- * U4 Contract Tests (CT-01〜13) を DynamoEventStore 対象で実行。
+ * U4 Contract Tests (CT-01〜16) を DynamoEventStore 対象で実行。
  *
  * 同 aggregateId で append → concurrent write 衝突を避けるため、各 case の
  * `makeStore` は新しい (aggregateId 空間を共有する) store instance を返す。
@@ -111,6 +111,7 @@ describe("DynamoDB Local availability", () => {
  */
 registerEventStoreContract({
   label: "DynamoEventStore (Local)",
+  isAvailable: () => available,
   makeStore: async () =>
     new DynamoEventStore<CounterEvents>({
       tableName: TABLE_NAME,
@@ -125,6 +126,7 @@ registerEventStoreContract({
  */
 registerSnapshotStoreContract({
   label: "DynamoSnapshotStore (Local)",
+  isAvailable: () => available,
   makeStore: async () =>
     new DynamoSnapshotStore<SnapshotTestState>({
       tableName: SNAPSHOT_TABLE_NAME,

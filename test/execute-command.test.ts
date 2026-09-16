@@ -3,6 +3,7 @@ import {
   ConcurrencyError,
   executeCommand,
   InMemoryEventStore,
+  InvalidEventStreamError,
   RetryExhaustedError,
 } from "../src/index.js";
 import { AlwaysFail, CountingStore, FailOnce } from "./doubles/event-store-doubles.js";
@@ -230,6 +231,76 @@ describe("executeCommand", () => {
       input: { amount: 1 },
     });
     expect(Object.hasOwn(res.newEvents[0] ?? {}, "correlationId")).toBe(false);
+  });
+
+  it("CT-EC-17 handler が evolve 未登録 type を emit → append 前に missing_evolve_handler (stream poison 防止)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    const err: unknown = await executeCommand({
+      config: counterConfig,
+      store,
+      // 型では防げない runtime 入力を cast で注入 (consumer bug の模擬)
+      handler: () => [{ type: "NotRegistered", data: {} }] as never,
+      aggregateId: "agg-1",
+      input: { amount: 1 },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(InvalidEventStreamError);
+    expect((err as InvalidEventStreamError).reason).toBe("missing_evolve_handler");
+    // commit 前に弾くため append は呼ばれず stream は空のまま
+    expect(store.appendCalls).toBe(0);
+    expect(await inner.load("agg-1")).toEqual([]);
+  });
+
+  it("CT-EC-18 post-commit (onCommitted) の ConcurrencyError は retry せず伝播する (二重 append 防止)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+        observer: {
+          // commit 後に ConcurrencyError を投げる consumer hook。
+          // append は既に成功済みなので、これを retry 捕捉すると二重 append になる。
+          onCommitted: () => {
+            throw new ConcurrencyError("agg-1", 0);
+          },
+        },
+      }),
+    ).rejects.toBeInstanceOf(ConcurrencyError);
+    expect(store.appendCalls).toBe(1); // retry しなかった = 二重 append なし
+    expect(await inner.load("agg-1")).toHaveLength(1); // commit は残る
+  });
+
+  it("CT-EC-19 post-commit の evolve が ConcurrencyError を投げても retry しない", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    // evolve が ConcurrencyError を投げる consumer bug。初回 load は空 stream なので
+    // evolve は append 後の post-commit 適用でのみ発火する。
+    const config = {
+      initialState: 0,
+      evolve: {
+        Incremented: () => {
+          throw new ConcurrencyError("agg-1", 0);
+        },
+      },
+    };
+    await expect(
+      executeCommand({
+        config,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(ConcurrencyError);
+    expect(store.appendCalls).toBe(1); // 内部 retry なし = 二重 append なし
+    expect(await inner.load("agg-1")).toHaveLength(1);
   });
 
   it("CT-EC-16 deterministic handler produces identical events on retry", async () => {

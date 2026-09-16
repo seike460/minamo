@@ -10,7 +10,10 @@ type AnyStored = StoredEvent<string, unknown>;
  * - DynamoEventStore と同じ汎用制約を実装する (version 検証、ギャップ検出、
  *   ConcurrencyError、空配列で EventLimitError、fresh read 保証)
  * - DynamoDB 固有のサイズ制約 (400KB / 4MB) は検証しない (DEC-006)
- * - Contract Tests (CT-01〜13) で DynamoEventStore との振る舞い一致を保証する
+ * - Contract Tests (CT-01〜16) で DynamoEventStore との振る舞い一致を保証する
+ * - append 入力と load/loadFrom/allEvents の返り値は structuredClone で caller と切り離す
+ *   (DynamoDB の marshall/unmarshall 相当の隔離)。structuredClone 不可能な非 plain data
+ *   (関数・class instance 等、DEC-011 違反) は `DataCloneError` で伝播する
  *
  * 本番環境では使わないこと。`allEvents` / `clear` はテスト専用。
  *
@@ -26,6 +29,12 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     expectedVersion: number,
     options?: AppendOptions,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw new EventLimitError(
+        aggregateId,
+        `expectedVersion must be a non-negative integer (got ${String(expectedVersion)})`,
+      );
+    }
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
@@ -51,8 +60,12 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
         : base;
     });
 
-    this.#streams.set(aggregateId, [...existing, ...stored]);
-    this.#insertionOrder.push(...stored);
+    // DynamoDB の marshall round-trip と同じく、保存時に live object と切り離す (痛み C 対策)。
+    // structuredClone を通せない非 plain data (関数・class instance 等) はここで fail-loud に検出
+    // される (DEC-011)。返り値は caller 所有のオリジナル (呼び出し側の変更は store に波及しない)。
+    const persisted = structuredClone(stored) as AnyStored[];
+    this.#streams.set(aggregateId, [...existing, ...persisted]);
+    this.#insertionOrder.push(...persisted);
 
     return stored as ReadonlyArray<StoredEventsOf<TMap>>;
   }
@@ -60,7 +73,8 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
     const events = this.#streams.get(aggregateId);
     if (events === undefined) return [];
-    return [...events] as ReadonlyArray<StoredEventsOf<TMap>>;
+    // DynamoDB の unmarshall と同様、返すたびに複製して呼び出し側の mutation から隔離する。
+    return structuredClone(events) as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 
   /**
@@ -76,12 +90,14 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
     const events = this.#streams.get(aggregateId);
     if (events === undefined) return [];
-    return events.filter((e) => e.version > afterVersion) as ReadonlyArray<StoredEventsOf<TMap>>;
+    return structuredClone(events.filter((e) => e.version > afterVersion)) as ReadonlyArray<
+      StoredEventsOf<TMap>
+    >;
   }
 
   /** 全ストリームの全イベントを insertion order で返す (テスト専用)。 */
   allEvents(): ReadonlyArray<StoredEventsOf<TMap>> {
-    return [...this.#insertionOrder] as ReadonlyArray<StoredEventsOf<TMap>>;
+    return structuredClone(this.#insertionOrder) as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 
   /** 全ストリームを初期化する (テスト専用)。 */

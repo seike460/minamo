@@ -9,7 +9,7 @@ import type { InferSchemaOutput, StandardSchemaV1 } from "./standard-schema.js";
  * 使い方:
  * ```ts
  * const input = await validate(userCommandInputSchema, raw);
- * await executeCommand({ aggregate, handler, input, ... });
+ * await executeCommand({ config, store, handler, aggregateId, input });
  * ```
  */
 export async function validate<Schema extends StandardSchemaV1>(

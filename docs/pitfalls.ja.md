@@ -116,6 +116,8 @@ const store = new DynamoEventStore<Events>({
 });
 ```
 
+SDK は利用時点で lazy 解決される (DEC-027)。SDK 未 install でも `import` 自体は成功し、Dynamo 系の利用時のみ明示的なエラーになる。handler を bundler (esbuild 等) で bundle する場合は `@aws-sdk/*` を **external** にすること — lazy 解決は `node_modules` を探すため、SDK を bundle に含めると「not installed」エラーになる。Lambda runtime は AWS SDK を同梱するため external は容量面でも有利。出力は **ESM のまま** にすること — lazy 解決は `import.meta.url` 上に構築されており、bundler が CJS に変換するとこれが消えて InMemory 利用の import すら壊れる。
+
 ---
 
 ## 6. Contract Tests は `append` / `load` の契約を保証する。projection timing は保証しない
@@ -136,3 +138,5 @@ minamo の Contract Tests は `InMemoryEventStore` / `DynamoEventStore` の以�
 `append` が `ConcurrencyError` (楽観的ロックの衝突) を投げた場合のみリトライされる。それ以外のエラー (handler throw / `InvalidEventStreamError` / SDK 通信エラー / `EventLimitError`) はそのまま伝播する (concept.md §4)。
 
 SDK の transient error に対するリトライが必要なら、`DynamoEventStore` をリトライ付き `EventStore` で wrap する。minamo の retry 層と混同しない。
+
+自動リトライの対象は `store.append` 自体が投げたエラーのみ。`evolve` や `ExecuteObserver.onCommitted` が append 確定「後」に `ConcurrencyError` を投げた場合はリトライされず呼び出し側に伝播する（リトライすると同じイベントを二重に append するため）。したがって `ConcurrencyError` を見た呼び出し側は「コマンドが commit されなかった」とは断定できない。end user に再試行を促す前に stream を読み直すか、consumer 側の冪等キーで再実行可否を判定すること。

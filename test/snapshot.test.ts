@@ -71,6 +71,45 @@ class FailingSaveSnapshotStore implements SnapshotStore<number> {
   }
 }
 
+/** 固定の snapshot を返す store double (custom SnapshotStore の契約違反を注入する)。 */
+class StubSnapshotStore implements SnapshotStore<number> {
+  constructor(private readonly snap: Snapshot<number>) {}
+  async load(): Promise<Snapshot<number> | null> {
+    return this.snap;
+  }
+  async save(): Promise<void> {}
+}
+
+/** loadFrom が truthy だが関数ではない store double (型違反入力。fallback 経路の検証用)。 */
+class NonFunctionLoadFromStore implements EventStore<CounterEvents> {
+  readonly #inner = new InMemoryEventStore<CounterEvents>();
+  loadCalls = 0;
+  // interface 上は optional method だが、custom store が誤って非関数を生やすケースを模擬
+  readonly loadFrom = {} as never;
+
+  append(
+    aggregateId: string,
+    events: ReadonlyArray<EventsOf<CounterEvents>>,
+    expectedVersion: number,
+    options?: AppendOptions,
+  ): Promise<ReadonlyArray<StoredEventsOf<CounterEvents>>> {
+    return this.#inner.append(aggregateId, events, expectedVersion, options);
+  }
+
+  async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<CounterEvents>>> {
+    this.loadCalls += 1;
+    return this.#inner.load(aggregateId);
+  }
+
+  seed(aggregateId: string, amount: number, expectedVersion: number) {
+    return this.#inner.append(
+      aggregateId,
+      [{ type: "Incremented", data: { amount } }],
+      expectedVersion,
+    );
+  }
+}
+
 describe("executeCommand + Snapshot", () => {
   it("snapshotPolicy.everyNEvents を跨いだら snapshot を save する", async () => {
     const store = new InMemoryEventStore<CounterEvents>();
@@ -226,5 +265,78 @@ describe("executeCommand + Snapshot", () => {
     expect(result.newEvents).toHaveLength(1);
     // append は commit 済み: 再 load でイベントが残っている (= 二重書き込み hazard を防ぐ)
     expect(await store.load("snap-fail")).toHaveLength(1);
+  });
+
+  it("custom SnapshotStore が契約違反の snapshot を返したら TypeError (strict)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-s", [{ type: "Incremented", data: { amount: 1 } }], 0);
+
+    const cases: Array<Snapshot<number>> = [
+      // 別 aggregate の snapshot → 別 state 起点の replay = silent corruption
+      { aggregateId: "other", version: 1, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      // NaN / 非整数 / 0 以下の version → loadFrom(NaN) は空を返し version が壊れる
+      {
+        aggregateId: "agg-s",
+        version: Number.NaN,
+        state: 0,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      { aggregateId: "agg-s", version: 0, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      { aggregateId: "agg-s", version: 1.5, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      // state 欠落 / undefined (own property 存在だけでは弾けない)
+      {
+        aggregateId: "agg-s",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      } as Snapshot<number>,
+      {
+        aggregateId: "agg-s",
+        version: 1,
+        state: undefined,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      } as unknown as Snapshot<number>,
+      // null 以外の非 object (undefined) を返す契約違反
+      undefined as unknown as Snapshot<number>,
+    ];
+
+    for (const snap of cases) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-s",
+          input: { amount: 1 },
+          snapshotStore: new StubSnapshotStore(snap),
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("loadFrom が非関数 (truthy) でも full load + filter に fallback する", async () => {
+    const store = new NonFunctionLoadFromStore();
+    const snapshots = new InMemorySnapshotStore<number>();
+
+    await store.seed("agg-nf", 10, 0);
+    await snapshots.save({
+      aggregateId: "agg-nf",
+      version: 1,
+      state: 10,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await store.seed("agg-nf", 5, 1);
+
+    const result = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "agg-nf",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+
+    // typeof 判定で fallback → load 全件 + filter。snapshot.state(10) + tail(5) + handler(1) = 16
+    expect(result.aggregate.state).toBe(16);
+    expect(store.loadCalls).toBe(1);
   });
 });

@@ -4,8 +4,8 @@
 
 ```ts
 
-import { DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 // @public
 export interface Aggregate<TState> {

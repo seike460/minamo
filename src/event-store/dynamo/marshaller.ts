@@ -1,4 +1,5 @@
 import type { StoredEvent } from "../../core/types.js";
+import { EventLimitError } from "../../errors.js";
 
 /**
  * DynamoDB item の shape。`DynamoDBDocumentClient` が marshall/unmarshall を担うため
@@ -77,5 +78,16 @@ export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unkn
  * とは完全一致しないため `SIZE_SLACK_BYTES` で overshoot を防ぐ運用。
  */
 export function approxItemSize(stored: StoredEvent<string, unknown>): number {
-  return new TextEncoder().encode(JSON.stringify(toItem(stored))).length;
+  let json: string;
+  try {
+    json = JSON.stringify(toItem(stored));
+  } catch (cause) {
+    // BigInt / circular 参照など JSON 非直列化の入力は DEC-011 違反。raw TypeError ではなく
+    // append 入力制約違反として EventLimitError に wrap して診断しやすくする。
+    throw new EventLimitError(
+      stored.aggregateId,
+      `event data is not JSON-serializable: ${(cause as Error).message}`,
+    );
+  }
+  return new TextEncoder().encode(json).length;
 }

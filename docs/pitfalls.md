@@ -116,6 +116,8 @@ const store = new DynamoEventStore<Events>({
 });
 ```
 
+The SDK is resolved lazily at use time (DEC-027), so importing minamo without the SDK installed works and only Dynamo-backed calls fail. If you bundle your handler (esbuild, etc.), mark `@aws-sdk/*` as **external** — the lazy resolution looks in `node_modules`, so a bundled-in SDK would still surface as "not installed". Lambda runtimes ship the AWS SDK anyway, so keeping it external is also the size-optimal setup. Keep the bundle output **ESM**: the lazy resolver is built on `import.meta.url`, which bundlers erase in CJS output — degrading to CJS breaks even InMemory-only imports.
+
 ---
 
 ## 6. Contract Tests cover `append` / `load`, not projection timing
@@ -136,3 +138,5 @@ They **do not** guarantee that projection-side reads converge at the same rate. 
 Automatic retry happens when `append` throws `ConcurrencyError` (optimistic-locking collision). Any other error — handler throwing, `InvalidEventStreamError`, SDK transport error, `EventLimitError` — propagates as-is (concept.md §4).
 
 If you want retries for transient SDK errors, wrap `DynamoEventStore` in a retrying `EventStore` adapter on the consumer side. Do not conflate the two retry layers.
+
+Only errors thrown by `store.append` itself are eligible for the automatic retry. If your `evolve` or `ExecuteObserver.onCommitted` throws a `ConcurrencyError` *after* the append has already committed, it propagates to the caller **without** a retry — retrying it would re-append the same events. This also means a caller that sees `ConcurrencyError` cannot assume the command was not committed; if you surface this error to end users, re-read the stream (or use your own idempotency key) before asking them to retry.
