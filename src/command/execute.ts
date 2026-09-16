@@ -281,7 +281,16 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
           state: updatedState,
           timestamp: new Date().toISOString(),
         };
-        await snapshotStore.save(snapshot);
+        // snapshot save は best-effort (DEC-026): append は既に commit 済みのため、save 失敗で
+        // command 全体を reject すると、呼び出し側が「失敗」とみなして再実行し二重書き込みを招く。
+        // snapshot は rehydration の最適化であり、save が失敗しても次回は前回 snapshot か full replay
+        // で正答する。framework-free を保つため log もしない（可観測性 hook は public surface を
+        // 拡大するため別途扱い）。
+        try {
+          await snapshotStore.save(snapshot);
+        } catch {
+          // best-effort: swallow（上記コメントの理由により command の成功を妨げない）
+        }
       }
 
       return {

@@ -4,6 +4,42 @@ import type { Snapshot, SnapshotStore } from "../../snapshot/types.js";
 import { resolveDocumentClient } from "./client.js";
 
 /**
+ * DynamoDB から取得した item を `Snapshot<TState>` に復元する際の最小 envelope 検証 (DEC-026)。
+ *
+ * `fromItem`（event marshaller）/ `parseStreamRecord`（stream bridge）と同じく、primary field の
+ * 欠損・型違反を沈黙させず `TypeError` として throw する。malformed snapshot は consumer の table が
+ * 壊れている兆候であり、`as unknown as` で盲信すると `version` 欠損が `baseVersion + 1 = NaN` のような
+ * 沈黙した rehydration 破綻を招く。`state` の中身の shape は consumer schema 責務のまま（`fromItem` の
+ * `data` と同方針）。余分な attribute は無視する。
+ */
+function fromSnapshotItem<TState>(item: Record<string, unknown>): Snapshot<TState> {
+  if (typeof item.aggregateId !== "string") {
+    throw new TypeError(
+      `DynamoDB snapshot item missing string aggregateId (got ${typeof item.aggregateId})`,
+    );
+  }
+  if (typeof item.version !== "number") {
+    throw new TypeError(
+      `DynamoDB snapshot item missing numeric version (got ${typeof item.version})`,
+    );
+  }
+  if (typeof item.timestamp !== "string") {
+    throw new TypeError(
+      `DynamoDB snapshot item missing string timestamp (got ${typeof item.timestamp})`,
+    );
+  }
+  if (!Object.hasOwn(item, "state")) {
+    throw new TypeError("DynamoDB snapshot item missing state attribute");
+  }
+  return {
+    aggregateId: item.aggregateId,
+    version: item.version,
+    state: item.state as TState,
+    timestamp: item.timestamp,
+  };
+}
+
+/**
  * `DynamoSnapshotStore` の設定 (concept.md §5.10, DEC-019)。
  *
  * client resolution は `DynamoEventStore` と同一 (client > clientConfig > default)。
@@ -47,7 +83,7 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
       }),
     );
     if (result.Item === undefined) return null;
-    return result.Item as unknown as Snapshot<TState>;
+    return fromSnapshotItem<TState>(result.Item as Record<string, unknown>);
   }
 
   async save(snapshot: Snapshot<TState>): Promise<void> {

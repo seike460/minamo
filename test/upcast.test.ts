@@ -3,6 +3,7 @@ import type { AggregateConfig, StoredEvent, Upcaster } from "../src/index.js";
 import {
   executeCommand,
   InMemoryEventStore,
+  InMemorySnapshotStore,
   InvalidEventStreamError,
   rehydrate,
 } from "../src/index.js";
@@ -94,5 +95,38 @@ describe("upcasting (AggregateConfig.upcast)", () => {
     // load → upcast(Added→Incremented=10) → state=10 → +5 → 15
     expect(result.aggregate.state).toBe(15);
     expect(result.aggregate.version).toBe(2);
+  });
+
+  it("snapshot 経路の tail イベントにも upcast が効く (upcast × snapshot)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<number>();
+
+    // version 1: 現行 "Incremented"(10) を append
+    await store.append("c-snap", [{ type: "Incremented", data: { amount: 10 } }], 0);
+    // snapshot(version=1, state=10) を保存
+    await snapshots.save({
+      aggregateId: "c-snap",
+      version: 1,
+      state: 10,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    // version 2: 旧スキーマ "Added"({value:7}) を tail として append（cast で legacy を注入）
+    await store.append("c-snap", [{ type: "Added", data: { value: 7 } }] as never, 1);
+
+    const result = await executeCommand({
+      config: configWithUpcast,
+      store,
+      handler: (_agg, input: { amount: number }) => [
+        { type: "Incremented", data: { amount: input.amount } },
+      ],
+      aggregateId: "c-snap",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+
+    // snapshot.state(10) を起点に loadFrom(v1) の tail = [Added(7)] を upcast→Incremented(7) で replay
+    // → 17、handler の +1 で 18。snapshot 短絡経路でも upcast 配線が保たれることを確認する。
+    expect(result.aggregate.state).toBe(18);
+    expect(result.aggregate.version).toBe(3);
   });
 });

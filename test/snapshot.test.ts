@@ -4,6 +4,8 @@ import type {
   EventStore,
   EventsOf,
   ExecuteObserver,
+  Snapshot,
+  SnapshotStore,
   StoredEventsOf,
 } from "../src/index.js";
 import { executeCommand, InMemoryEventStore, InMemorySnapshotStore } from "../src/index.js";
@@ -54,6 +56,18 @@ class LoadFromStore implements EventStore<CounterEvents> {
       [{ type: "Incremented", data: { amount } }],
       expectedVersion,
     );
+  }
+}
+
+/** save が常に reject する SnapshotStore double (DEC-026: snapshot save は best-effort)。 */
+class FailingSaveSnapshotStore implements SnapshotStore<number> {
+  saveCalls = 0;
+  async load(): Promise<Snapshot<number> | null> {
+    return null;
+  }
+  async save(): Promise<void> {
+    this.saveCalls += 1;
+    throw new Error("snapshot backend unavailable");
   }
 }
 
@@ -189,5 +203,28 @@ describe("executeCommand + Snapshot", () => {
 
     expect(seenState).toBe(100); // snapshot.state が起点 (full replay の 3 ではない)
     expect(result.aggregate.state).toBe(101);
+  });
+
+  it("snapshot save が失敗しても command は成功しイベントは commit される (best-effort, DEC-026)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new FailingSaveSnapshotStore();
+
+    // everyNEvents=1 で version 1 を跨ぐため save を試みる → reject されるが握りつぶす。
+    const result = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "snap-fail",
+      input: { amount: 5 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    });
+
+    expect(snapshots.saveCalls).toBe(1); // save は確かに試行された
+    expect(result.aggregate.state).toBe(5); // save 失敗にもかかわらず command は正常完了
+    expect(result.aggregate.version).toBe(1);
+    expect(result.newEvents).toHaveLength(1);
+    // append は commit 済み: 再 load でイベントが残っている (= 二重書き込み hazard を防ぐ)
+    expect(await store.load("snap-fail")).toHaveLength(1);
   });
 });
