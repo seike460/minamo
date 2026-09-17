@@ -424,5 +424,29 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       expect(data.nested).toEqual({ a: [{ b: null, c: [1, "two", true] }] });
       expect(data.nullProto).toEqual({ v: 1 });
     });
+
+    it("CT-23 events が非配列・null → EventLimitError (raw TypeError に落とさない)", async () => {
+      const store = await makeStore();
+      // `events.length` のアクセスで生 TypeError になる前に、assertDomainEvents の
+      // isArray 検査で EventLimitError に揃える (backend 非依存の契約として固定)。
+      for (const bad of [null, undefined, "events", 42, { length: 2 }]) {
+        await expect(store.append("agg-23", bad as never, 0), String(bad)).rejects.toBeInstanceOf(
+          EventLimitError,
+        );
+      }
+      expect(await store.load("agg-23")).toEqual([]);
+    });
+
+    it("CT-24 event data が Proxy → EventLimitError (生 DataCloneError に落とさない)", async () => {
+      const store = await makeStore();
+      // Proxy は assertPlainData の検査 (prototype/keys/symbol) がすべて target に
+      // forward されるため検出不能だが、structuredClone は失敗する。clone 失敗を
+      // append 入力制約違反として両 store で同じ error type に揃える。
+      const proxyData = new Proxy({ amount: 1 }, {});
+      await expect(
+        store.append("agg-24", [{ type: "Incremented", data: proxyData }] as never, 0),
+      ).rejects.toBeInstanceOf(EventLimitError);
+      expect(await store.load("agg-24")).toEqual([]);
+    });
   });
 }

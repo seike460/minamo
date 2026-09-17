@@ -1,5 +1,6 @@
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { EventMap } from "../../core/types.js";
+import { assertTableName } from "../../internal/guards.js";
 import { type DynamoEventStoreConfig, resolveDocumentClient } from "./client.js";
 import { DynamoEventStore } from "./index.js";
 
@@ -35,6 +36,9 @@ export interface EventStoreTable {
  * ```
  */
 export function createEventStoreTable(config: DynamoEventStoreConfig): EventStoreTable {
+  // `.for<TMap>()` 時点ではなく facade 生成時点で tableName を検証する
+  // (store の lazy 生成に設定ミスの検出を遅らせない)。
+  assertTableName(config?.tableName);
   const client: DynamoDBDocumentClient = resolveDocumentClient(config);
   const { tableName } = config;
   return {

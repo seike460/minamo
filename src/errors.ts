@@ -103,9 +103,22 @@ export class ValidationError extends Error {
     /** Standard Schema vendor が返した構造化された違反情報の配列。 */
     readonly issues: readonly StandardSchemaIssue[],
   ) {
-    super(`Validation failed: ${issues.map(formatIssue).join("; ")}`);
+    super(`Validation failed: ${formatIssues(issues)}`);
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+/**
+ * error message の上限長。vendor が返す issue が非常に多い・長い場合に
+ * message が無制限に膨らみ log を flood するのを防ぐ。全情報は
+ * `err.issues` (構造化データ) に残るため message の truncate で診断性は失われない。
+ */
+const MAX_VALIDATION_MESSAGE_LENGTH = 2048;
+
+function formatIssues(issues: readonly StandardSchemaIssue[]): string {
+  const formatted = issues.map(formatIssue).join("; ");
+  if (formatted.length <= MAX_VALIDATION_MESSAGE_LENGTH) return formatted;
+  return `${formatted.slice(0, MAX_VALIDATION_MESSAGE_LENGTH)}… (${issues.length} issues total)`;
 }
 
 function formatIssue(issue: StandardSchemaIssue): string {

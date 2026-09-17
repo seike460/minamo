@@ -34,6 +34,80 @@ export function assertAggregateId(aggregateId: unknown): asserts aggregateId is 
 }
 
 /**
+ * `AggregateConfig` の最小 shape 検証。
+ *
+ * `config.initialState` が欠落・undefined のまま `structuredClone` に流れると
+ * `state: undefined` の Aggregate が静かに生成され、`config.evolve` が非 object だと
+ * `Object.hasOwn` の生 TypeError まで到達してしまう。入口で弾いて契約違反を明示する。
+ * `initialState: null` は plain data として合法なため `hasOwn` + `undefined` 値の
+ * 組み合わせでのみ弾く。
+ */
+export function assertAggregateConfig(config: unknown): void {
+  if (config === null || typeof config !== "object") {
+    throw new TypeError("config must be an AggregateConfig object");
+  }
+  const c = config as { initialState?: unknown; evolve?: unknown; upcast?: unknown };
+  if (!Object.hasOwn(config, "initialState") || c.initialState === undefined) {
+    throw new TypeError("config.initialState is required (undefined is not plain data)");
+  }
+  if (c.evolve === null || typeof c.evolve !== "object") {
+    throw new TypeError("config.evolve must be an object map of evolve handlers");
+  }
+  if (c.upcast !== undefined && typeof c.upcast !== "function") {
+    throw new TypeError("config.upcast must be a function");
+  }
+}
+
+/**
+ * `EventStore` 実装の最小 shape 検証。
+ *
+ * `load` / `append` の非関数・欠落は呼び出し時の生 TypeError になるため入口で弾く。
+ * `loadFrom` は optional (DEC-019) で、非関数値は「未実装」として full load + filter に
+ * fallback する既存契約のためここでは検査しない (typeof 判定が呼び出し側で走る)。
+ */
+export function assertEventStoreShape(store: unknown): void {
+  if (store === null || typeof store !== "object") {
+    throw new TypeError("store must be an EventStore object");
+  }
+  const s = store as { load?: unknown; append?: unknown };
+  if (typeof s.load !== "function") {
+    throw new TypeError("store.load must be a function");
+  }
+  if (typeof s.append !== "function") {
+    throw new TypeError("store.append must be a function");
+  }
+}
+
+/**
+ * `SnapshotStore` 実装の最小 shape 検証。`load` / `save` の非関数・欠落を入口で弾く。
+ */
+export function assertSnapshotStoreShape(store: unknown): void {
+  if (store === null || typeof store !== "object") {
+    throw new TypeError("snapshotStore must be a SnapshotStore object");
+  }
+  const s = store as { load?: unknown; save?: unknown };
+  if (typeof s.load !== "function" || typeof s.save !== "function") {
+    throw new TypeError("snapshotStore must have load and save functions");
+  }
+}
+
+/**
+ * DynamoDB table 名の最小検証。空文字・非文字列を constructor 時点で弾き、
+ * 初回の service call まで設定ミスが持ち越されないようにする。
+ * AWS の命名規則 (3-255 chars 等) までは強制しない — local / mock endpoint や
+ * 将来の規則変更に対して寛容でいるため、契約上必須なのは「非空文字列」のみ。
+ */
+export function assertTableName(tableName: unknown): asserts tableName is string {
+  if (typeof tableName !== "string" || tableName.length === 0) {
+    throw new TypeError(
+      `tableName must be a non-empty string (got ${
+        typeof tableName === "string" ? '""' : typeof tableName
+      })`,
+    );
+  }
+}
+
+/**
  * `append` に渡される各 event の最小 envelope 検証。
  *
  * `executeCommand` 経由では pre-append 検証が走るが、`store.append` は public API で
@@ -257,8 +331,14 @@ export function assertSnapshot(snapshot: Snapshot<unknown>): void {
   if (!Object.hasOwn(snapshot, "state") || snapshot.state === undefined) {
     throw new TypeError("snapshot missing state");
   }
-  assertPlainData(snapshot.state, "snapshot state");
   if (typeof snapshot.timestamp !== "string") {
     throw new TypeError("snapshot missing string timestamp");
   }
+  // state だけでなく snapshot 全体を検証する。consumer 側の extra attribute
+  // (TTL 用の数値等) は認めるが、Date / Map 等の非 plain な extra は
+  // InMemory では clone で保持され DynamoDB では marshall が空 object に
+  // 退化させる (または throw する) ため backend 間で保存結果が食い違う。
+  // envelope の型検査を先に済ませてあるため、ここで whole-object を検証しても
+  // 診断 message の path は "snapshot.<field>" と具体的に出る。
+  assertPlainData(snapshot, "snapshot");
 }

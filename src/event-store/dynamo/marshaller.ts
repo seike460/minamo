@@ -52,6 +52,11 @@ export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unkn
   // `"__proto__"` キーを持つ item を受けると返り値 object の [[Prototype]] を汚染する
   // (acc[key]= の変異が __proto__ setter を踏む)。typeof 検査だけだと prototype 経由で
   // 供給された偽装 field を受理してしまうため、own property であることを必須にする。
+  if (raw === null || typeof raw !== "object") {
+    // mock client 由来の非 object item (null 要素等) で `Object.hasOwn` の
+    // 生 TypeError に落ちないよう防御する。
+    throw new TypeError("DynamoDB item is not an object");
+  }
   if (!Object.hasOwn(raw, "aggregateId") || typeof raw.aggregateId !== "string") {
     throw new TypeError(`DynamoDB item missing string aggregateId (got ${typeof raw.aggregateId})`);
   }

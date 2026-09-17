@@ -213,6 +213,50 @@ describe("parseStreamRecord", () => {
     expectTypeOf(result).toEqualTypeOf<StoredEvent<"Incremented", unknown> | null>();
   });
 
+  it("CT-PB-17 throws TypeError when eventNames is not an array", () => {
+    // `eventNames.includes` が生 TypeError になる前に入口で弾く。
+    for (const bad of [null, undefined, "Incremented", 42, { includes: () => true }]) {
+      expect(() => parseStreamRecord<CounterEvents>(insertRecord(), bad as never)).toThrow(
+        TypeError,
+      );
+    }
+  });
+
+  it("CT-PB-18 throws missing_field when NewImage unmarshalls to an empty item", () => {
+    // NewImage が空 map だと unmarshall は {} を返す。必須 field 欠落として
+    // missing_field で弾く (生 TypeError に落とさない)。
+    const bad: StreamRecordFixture = { eventName: "INSERT", dynamodb: { NewImage: {} } };
+    try {
+      parseStreamRecord<CounterEvents>(bad, acceptedNames);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidStreamRecordError);
+      const e = err as InvalidStreamRecordError;
+      expect(e.reason).toBe("missing_field");
+      expect(e.detail).toBe("aggregateId");
+    }
+  });
+
+  it("CT-PB-19 throws missing_field when aggregateId is an empty string", () => {
+    // 空文字は DynamoDB partition key として成立しないため欠落扱いにする。
+    const bad = insertRecord({
+      aggregateId: "",
+      version: 1,
+      type: "Incremented",
+      data: { amount: 1 },
+      timestamp: "2026-04-17T00:00:00.000Z",
+    });
+    try {
+      parseStreamRecord<CounterEvents>(bad, acceptedNames);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidStreamRecordError);
+      const e = err as InvalidStreamRecordError;
+      expect(e.reason).toBe("missing_field");
+      expect(e.detail).toBe("aggregateId");
+    }
+  });
+
   it("CT-PB-16 throws missing_field when type or timestamp is absent", () => {
     // type / timestamp の欠落も missing_field で detail に field 名が入る。
     const noType = insertRecord({

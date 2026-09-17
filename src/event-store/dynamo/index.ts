@@ -6,6 +6,7 @@ import {
   assertAggregateId,
   assertAppendOptions,
   assertDomainEvents,
+  assertTableName,
 } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { AppendOptions, EventStore } from "../types.js";
@@ -72,6 +73,10 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
   readonly #tableName: string;
 
   constructor(config: DynamoEventStoreConfig) {
+    // 空文字・非文字列の tableName を constructor 時点で弾き、初回 service call まで
+    // 設定ミスが持ち越されないようにする (config 自体の null/undefined も同じ
+    // TypeError に揃える)。
+    assertTableName(config?.tableName);
     this.#tableName = config.tableName;
     this.#doc = resolveDocumentClient(config);
   }
@@ -90,10 +95,12 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     }
     assertAggregateId(aggregateId);
     assertAppendOptions(aggregateId, options);
+    // assertDomainEvents を先に呼ぶ: 非配列・null 入力に対して `events.length` の
+    // 生 TypeError ではなく "events must be an array" の EventLimitError で弾く。
+    assertDomainEvents(aggregateId, events);
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
-    assertDomainEvents(aggregateId, events);
     if (events.length > MAX_EVENTS_PER_APPEND) {
       throw new EventLimitError(
         aggregateId,
@@ -115,9 +122,25 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
         : base;
     });
 
+    // clone は検証・send の前に作る: `stored` は入力 `events[i].data` と参照を共有
+    // するため、size 検証・marshall・返り値をすべて clone (`out`) 側に揃える。
+    // こうしないと「検証した内容」と「実際に marshall した内容」が別オブジェクトになり、
+    // async の marshall 窓で caller が入力を mutate した場合に書き込み内容が検証結果と
+    // 食い違う。また commit 後に structuredClone が投げると「書き込み済みなのに失敗に
+    // 見える」状態になる (二重 append hazard) ので clone も commit 前に行う。
+    // clone 不可能な data (関数値・Proxy 等、DEC-011 違反) はここで pre-commit に失敗する。
+    // assertPlainData は Proxy を検出できない (prototype/keys は target に forward される)
+    // ため、clone の失敗を append 入力制約違反として EventLimitError に揃える。
+    let out: ReadonlyArray<StoredEventsOf<TMap>>;
+    try {
+      out = structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
+    } catch {
+      throw new EventLimitError(aggregateId, "event data is not structured-cloneable");
+    }
+
     let totalSize = 0;
-    for (let i = 0; i < stored.length; i++) {
-      const event = stored[i];
+    for (let i = 0; i < out.length; i++) {
+      const event = out[i];
       if (event === undefined) continue;
       const itemSize = approxItemSize(event);
       // 4MB transaction チェックと同じく slack を引く: approxItemSize は JSON byte 近似で、
@@ -137,13 +160,7 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       );
     }
 
-    // 返り値用の clone は send 前に作る: `stored` は入力 `events[i].data` と参照を共有
-    // するため返り値の隔離が必要だが、commit 後に structuredClone が投げると
-    // 「書き込み済みなのに失敗に見える」状態になる (二重 append hazard)。
-    // clone 不可能な data (関数値等、DEC-011 違反) はここで pre-commit に失敗する。
-    const out = structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
-
-    const transactItems: TransactWriteCommand["input"]["TransactItems"] = stored.map((e) => ({
+    const transactItems: TransactWriteCommand["input"]["TransactItems"] = out.map((e) => ({
       Put: {
         TableName: this.#tableName,
         Item: toItem(e) as unknown as Record<string, unknown>,

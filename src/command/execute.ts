@@ -2,7 +2,15 @@ import type { Aggregate, AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEventsOf } from "../core/types.js";
 import { ConcurrencyError, InvalidEventStreamError, RetryExhaustedError } from "../errors.js";
 import type { AppendOptions, EventStore } from "../event-store/types.js";
-import { assertAggregateId, assertPlainData, clip } from "../internal/guards.js";
+import {
+  assertAggregateConfig,
+  assertAggregateId,
+  assertEventStoreShape,
+  assertPlainData,
+  assertSnapshotStoreShape,
+  clip,
+  normalizePlainData,
+} from "../internal/guards.js";
 import type { ExecuteObserver } from "../observability.js";
 import type { Snapshot, SnapshotPolicy, SnapshotStore } from "../snapshot/types.js";
 import type { ReadonlyDeep } from "../types.js";
@@ -24,6 +32,23 @@ function hasEvolveHandler<TState, TMap extends EventMap>(
     Object.hasOwn(config.evolve, type) &&
     typeof (config.evolve as Record<string, unknown>)[type] === "function"
   );
+}
+
+/**
+ * `evolve` の戻り値が「次の state」として成立するかを検証する。
+ *
+ * `undefined` (return 忘れ) と thenable (async evolve の付け忘れ) を弾く。
+ * 前者は `state: undefined` の Aggregate を、後者は `state` が Promise に
+ * なる静かな破綻を生む — どちらも evolve の契約 (純粋な同期関数) 違反。
+ * `null` は plain data として合法な TState になりうるため通す。
+ */
+function assertEvolveResult<TState>(next: TState, eventType: string): TState {
+  if (next === undefined || typeof (next as { then?: unknown })?.then === "function") {
+    throw new TypeError(
+      `evolve handler for event type ${clip(eventType)} must return a state synchronously`,
+    );
+  }
+  return next;
 }
 
 /**
@@ -151,10 +176,11 @@ function replayEvents<TState, TMap extends EventMap>(
     // 上の hasEvolveHandler 検証で own callable handler の存在は保証済み (防御的に undefined を除く)
     const handler = config.evolve[e.type as keyof TMap & string];
     if (handler === undefined) continue;
-    state = handler(
+    const next = handler(
       state as ReadonlyDeep<TState>,
       e.data as ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>,
     );
+    state = assertEvolveResult(next, e.type);
   }
 
   return {
@@ -180,11 +206,20 @@ export function rehydrate<TState, TMap extends EventMap>(
   id: string,
   events: ReadonlyArray<StoredEventsOf<TMap>>,
 ): Aggregate<TState> {
+  assertAggregateConfig(config);
   assertAggregateId(id);
   if (!Array.isArray(events)) {
     throw new TypeError("events must be an array");
   }
-  return replayEvents(config, id, structuredClone(config.initialState) as TState, 0, events);
+  let initialState: TState;
+  try {
+    initialState = structuredClone(config.initialState) as TState;
+  } catch {
+    // 非 cloneable な initialState (関数・Symbol 等、DEC-011 違反) を生の
+    // DataCloneError ではなく契約違反の TypeError に揃える。
+    throw new TypeError("config.initialState must be structured-cloneable");
+  }
+  return replayEvents(config, id, initialState, 0, events);
 }
 
 /**
@@ -266,7 +301,10 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
       }
       let baseState: TState;
       try {
-        baseState = structuredClone(snapshot.state) as TState;
+        // DynamoSnapshotStore.load (fromSnapshotItem) と同じ正規化を custom store の
+        // state にも適用する: clone による隔離に加え、own `__proto__` data key を
+        // 再帰的に除去して backend 間の parity を保つ (痛み C)。
+        baseState = normalizePlainData(snapshot.state) as TState;
       } catch {
         // custom SnapshotStore が非 cloneable な state (関数・Symbol 等) を返した場合、
         // 生の DataCloneError (DOMException) ではなく契約違反として TypeError に正規化する。
@@ -354,16 +392,35 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new RangeError(`maxRetries must be a non-negative integer, got: ${String(maxRetries)}`);
   }
-  // NaN / ±Infinity は `everyNEvents < 1` の「無効化」分岐をすり抜けて
-  // 二度と発火しない (または比較不能になる) ため明示的に弾く。
-  if (snapshotPolicy !== undefined && !Number.isFinite(snapshotPolicy.everyNEvents)) {
-    throw new TypeError(
-      `snapshotPolicy.everyNEvents must be a finite number, got: ${String(snapshotPolicy.everyNEvents)}`,
-    );
+  if (snapshotPolicy !== undefined) {
+    if (snapshotPolicy === null || typeof snapshotPolicy !== "object") {
+      throw new TypeError("snapshotPolicy must be an object");
+    }
+    // NaN / ±Infinity は `everyNEvents < 1` の「無効化」分岐をすり抜けて
+    // 二度と発火しない (または比較不能になる) ため明示的に弾く。
+    if (!Number.isFinite(snapshotPolicy.everyNEvents)) {
+      throw new TypeError(
+        `snapshotPolicy.everyNEvents must be a finite number, got: ${String(snapshotPolicy.everyNEvents)}`,
+      );
+    }
   }
   assertAggregateId(aggregateId);
   if (correlationId !== undefined && typeof correlationId !== "string") {
     throw new TypeError(`correlationId must be a string (got ${typeof correlationId})`);
+  }
+  // 依存オブジェクトの shape 検証。非関数の `store.load` や欠落した `handler` は
+  // 呼び出し時の生 TypeError になるだけだが、非 object の `observer` / 非関数の
+  // `store.loadFrom` のように「静かに効かない」入力をここで弾く (fail-loud 方針)。
+  assertAggregateConfig(config);
+  if (typeof handler !== "function") {
+    throw new TypeError("handler must be a function");
+  }
+  assertEventStoreShape(store);
+  if (observer !== undefined && (observer === null || typeof observer !== "object")) {
+    throw new TypeError("observer must be an object of ExecuteObserver hooks");
+  }
+  if (snapshotStore !== undefined) {
+    assertSnapshotStoreShape(snapshotStore);
   }
 
   const appendOptions: AppendOptions | undefined =
@@ -430,16 +487,42 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     // throw すると「イベントは永続化済みなのに呼び出し側には失敗に見える」状態になり、
     // caller の再実行が二重 append を招く (DEC-026 と同型の hazard)。
     // decided は直前に shape + evolve 登録を検証済みのため、ここでは純粋に state を畳む。
-    let updatedState = structuredClone(aggregate.state) as TState;
-    for (const d of decided) {
+    let updatedState: TState;
+    try {
+      updatedState = structuredClone(aggregate.state) as TState;
+    } catch {
+      // replayed state が非 cloneable (consumer evolve の DEC-011 違反) の場合、
+      // 生の DataCloneError ではなく契約違反の TypeError に揃える。
+      throw new TypeError("aggregate state is not structured-cloneable");
+    }
+    for (const [i, d] of decided.entries()) {
       const evolveHandler = config.evolve[d.type as keyof TMap & string];
       // evolve には data の clone を渡す: 不純な evolve が payload を mutate しても
       // 永続化される `decided` に波及しない (DEC-011 は consumer 契約だが、pre-append
       // 化により mutate の被害範囲が「返り値」から「永続化データ」に拡大したため防御)。
-      updatedState = evolveHandler(
-        updatedState as ReadonlyDeep<TState>,
-        structuredClone(d.data) as ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>,
-      );
+      let eventData: ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>;
+      try {
+        eventData = structuredClone(d.data) as typeof eventData;
+      } catch {
+        // Proxy 等の非 cloneable な data (DEC-011 違反) を生の DataCloneError
+        // ではなく契約違反の TypeError に揃える。
+        throw new TypeError(`handler returned event at index ${i} with non-cloneable data`);
+      }
+      const next = evolveHandler(updatedState as ReadonlyDeep<TState>, eventData);
+      updatedState = assertEvolveResult(next, d.type);
+    }
+
+    // append 成功後の version (postcondition で newEvents.length === decided.length が
+    // 検証されるため、この時点で確定的に計算できる)。この commit で snapshot 発火が
+    // 予定されるなら、保存対象の state が DEC-011 を満たすかを commit 前に検証する。
+    // post-commit の save は best-effort で失敗を握りつぶすため、ここで弾かないと
+    // 「snapshot が二度と書かれない」静かな劣化になる。
+    const committedVersion = aggregate.version + decided.length;
+    if (
+      snapshotStore !== undefined &&
+      shouldSnapshot(snapshotPolicy, aggregate.version, committedVersion)
+    ) {
+      assertPlainData(updatedState, "aggregate state (snapshot candidate)");
     }
 
     // retry の発火条件は append の ConcurrencyError のみ (concept.md §5.6)。commit 後処理
@@ -482,13 +565,14 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       if (
         e === null ||
         typeof e !== "object" ||
+        typeof e.type !== "string" ||
         e.aggregateId !== aggregateId ||
         e.version !== aggregate.version + i + 1
       ) {
         throw new TypeError(`EventStore.append returned an invalid stored event at index ${i}`);
       }
     }
-    const version = aggregate.version + newEvents.length;
+    const version = committedVersion;
     try {
       observer?.onCommitted?.({ aggregateId, newEventCount: newEvents.length, version });
     } finally {

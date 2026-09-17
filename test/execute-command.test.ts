@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { AggregateConfig } from "../src/index.js";
 import {
   ConcurrencyError,
   EventLimitError,
   executeCommand,
   InMemoryEventStore,
+  InMemorySnapshotStore,
   InvalidEventStreamError,
   RetryExhaustedError,
 } from "../src/index.js";
@@ -614,6 +616,7 @@ describe("executeCommand", () => {
       ["aggregateId 不一致", () => [mkStored({ aggregateId: "other" })]],
       ["非配列", () => ({ length: 1 })],
       ["null 要素", () => [null]],
+      ["type 非 string", () => [mkStored({ type: 42 })]],
     ];
     for (const [name, makeResult] of cases) {
       const store = {
@@ -654,5 +657,190 @@ describe("executeCommand", () => {
         correlationId: 42 as unknown as string,
       }),
     ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("CT-EC-34 malformed config → TypeError (load 前)", async () => {
+    const store = new CountingStore<CounterEvents>(new InMemoryEventStore<CounterEvents>());
+    for (const bad of [
+      null,
+      "not-an-object",
+      { evolve: {} }, // initialState 欠落 → state: undefined の静かな生成を防ぐ
+      { initialState: 0 }, // evolve 欠落
+      { initialState: 0, evolve: {}, upcast: 42 }, // upcast が非関数
+    ]) {
+      await expect(
+        executeCommand({
+          config: bad as never,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(store.loadCalls).toBe(0);
+    expect(store.appendCalls).toBe(0);
+  });
+
+  it("CT-EC-35 malformed 依存 (handler / store / observer / snapshotStore / snapshotPolicy) → TypeError", async () => {
+    const store = new CountingStore<CounterEvents>(new InMemoryEventStore<CounterEvents>());
+    const base = {
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "agg-1",
+      input: { amount: 1 },
+    };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["handler 非関数", { handler: 42 }],
+      ["store が null", { store: null }],
+      ["store.load 欠落", { store: { append: async () => [] } }],
+      ["store.append 欠落", { store: { load: async () => [] } }],
+      // 非 object の observer は `observer?.onX` が全て silent skip になるため弾く
+      ["observer が非 object", { observer: 42 }],
+      ["observer が null", { observer: null }],
+      ["snapshotStore が非 object", { snapshotStore: 42 }],
+      ["snapshotStore に load が無い", { snapshotStore: { save: async () => {} } }],
+      ["snapshotStore に save が無い", { snapshotStore: { load: async () => null } }],
+      // null / 非 object の snapshotPolicy は `.everyNEvents` アクセスが生 TypeError になるため弾く
+      ["snapshotPolicy が null", { snapshotPolicy: null }],
+      ["snapshotPolicy が非 object", { snapshotPolicy: 42 }],
+    ];
+    for (const [name, over] of cases) {
+      await expect(executeCommand({ ...base, ...over } as never), name).rejects.toBeInstanceOf(
+        TypeError,
+      );
+    }
+    expect(store.loadCalls).toBe(0);
+    expect(store.appendCalls).toBe(0);
+  });
+
+  it("CT-EC-36 evolve が undefined / Promise を返す → TypeError (commit 前、append 未到達)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    for (const badEvolve of [() => undefined, async () => 1]) {
+      const config = {
+        initialState: 0,
+        evolve: { Incremented: badEvolve },
+      } as unknown as typeof counterConfig;
+      await expect(
+        executeCommand({
+          config,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(store.appendCalls).toBe(0);
+    expect(await inner.load("agg-1")).toEqual([]);
+  });
+
+  it("CT-EC-37 snapshot 発火時に state が非 plain data → commit 前に TypeError (静かな snapshot 欠落を防ぐ)", async () => {
+    // state に Date (DEC-011 違反) を混入させる evolve。post-commit の snapshot save は
+    // best-effort で失敗を握りつぶすため、commit 前に弾かないと「snapshot が二度と
+    // 書かれない」静かな劣化になる。
+    type State = { at: unknown };
+    const config = {
+      initialState: { at: null },
+      evolve: { Touched: () => ({ at: new Date(0) }) },
+    } as unknown as AggregateConfig<State, { Touched: null }>;
+    const inner = new InMemoryEventStore<{ Touched: null }>();
+    const snapshots = new InMemorySnapshotStore<State>();
+    await expect(
+      executeCommand({
+        config,
+        store: inner,
+        handler: () => [{ type: "Touched", data: null }],
+        aggregateId: "agg-1",
+        input: undefined,
+        snapshotStore: snapshots,
+        snapshotPolicy: { everyNEvents: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    // commit 前に弾くため stream も snapshot も空のまま
+    expect(await inner.load("agg-1")).toEqual([]);
+    expect(await snapshots.load("agg-1")).toBeNull();
+  });
+
+  it("CT-EC-38b handler が Proxy の data を返す → TypeError (生 DataCloneError に落とさない)", async () => {
+    // Proxy は assertPlainData の検査が target に forward されるため plain-data
+    // 検証をすり抜けるが、evolve 用の structuredClone は DataCloneError を投げる。
+    // 契約違反 (DEC-011) として TypeError に正規化されることを固定する。
+    const proxyData = new Proxy({ amount: 1 }, {});
+    const store = new InMemoryEventStore<CounterEvents>();
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: () => [{ type: "Incremented", data: proxyData }],
+        aggregateId: "agg-px",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(await store.load("agg-px")).toEqual([]);
+  });
+
+  it("CT-EC-38a replayed state が非 cloneable → commit 前に TypeError (生 DataCloneError に落とさない)", async () => {
+    // evolve が関数を含む state を返すと aggregate.state が非 cloneable になる。
+    // updatedState の structuredClone が生 DataCloneError を投げるのを防ぎ、
+    // 契約違反 (DEC-011) として TypeError に正規化する。
+    const config = {
+      initialState: { v: 0 },
+      evolve: { Incremented: () => ({ v: 0, fn: () => 1 }) },
+    } as unknown as AggregateConfig<{ v: number }, CounterEvents>;
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-nc", [{ type: "Incremented", data: { amount: 1 } }], 0);
+    await expect(
+      executeCommand({
+        config,
+        store,
+        handler: () => [{ type: "Incremented", data: { amount: 1 } }],
+        aggregateId: "agg-nc",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("CT-EC-38 custom SnapshotStore が __proto__ key を含む state を返す → 正規化して replay", async () => {
+    // DynamoSnapshotStore.load (fromSnapshotItem) と同じ normalizePlainData が
+    // custom store の state にも適用されること: own `__proto__` data key は除去され、
+    // [[Prototype]] への代入として誤解釈されない。
+    const polluted = JSON.parse('{"count": 5, "__proto__": {"polluted": true}}') as {
+      count: number;
+    };
+    const snapshotStore = {
+      load: async () => ({
+        aggregateId: "agg-pp",
+        version: 1,
+        state: polluted,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      }),
+      save: async () => {},
+    };
+    type ObjState = { count: number };
+    const config = {
+      initialState: { count: 0 },
+      evolve: {
+        Incremented: (s: ObjState, d: { amount: number }) => ({ count: s.count + d.amount }),
+      },
+    } as AggregateConfig<ObjState, CounterEvents>;
+    // snapshot.version=1 と整合するよう stream を version=1 まで seed する
+    // (snapshot が stream より進んでいると append が ConcurrencyError になるため)。
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-pp", [{ type: "Incremented", data: { amount: 5 } }], 0);
+    const res = await executeCommand({
+      config,
+      store,
+      handler: (_agg, i: { amount: number }) =>
+        i.amount === 0 ? [] : [{ type: "Incremented", data: { amount: i.amount } }],
+      aggregateId: "agg-pp",
+      input: { amount: 1 },
+      snapshotStore: snapshotStore,
+    });
+    expect(res.aggregate.state).toEqual({ count: 6 });
+    // 正規化により own `__proto__` key は保持されない (Dynamo 経路と parity)
+    expect(Object.hasOwn(res.aggregate.state, "__proto__")).toBe(false);
   });
 });

@@ -145,5 +145,47 @@ export function registerSnapshotStoreContract(ctx: SnapshotContractContext): voi
       const store = await makeStore();
       await expect(store.load("")).rejects.toBeInstanceOf(TypeError);
     });
+
+    it("CT-SS-08 snapshot の extra attribute も plain data を要求 (backend 間の silent divergence を塞ぐ)", async () => {
+      const store = await makeStore();
+      const base = {
+        aggregateId: "ss-08",
+        version: 1,
+        state: { count: 1, tags: [] },
+        timestamp: "2026-01-01T00:00:00.000Z",
+      };
+      // plain data の extra key (TTL 用 epoch 等) は受理される
+      await store.save({ ...base, ttl: 1735689600 } as never);
+      // 非 plain な extra は InMemory では保持され DynamoDB では marshall が
+      // 空 object に退化/失敗するため、write 側で統一的に弾く。
+      for (const extra of [
+        { expiresAt: new Date(0) },
+        { meta: new Map([["k", 1]]) },
+        { callback: () => 1 },
+      ]) {
+        await expect(
+          store.save({ ...base, ...extra } as never),
+          Object.keys(extra)[0],
+        ).rejects.toBeInstanceOf(TypeError);
+      }
+    });
+
+    it("CT-SS-09 snapshot が Proxy → TypeError (生 DataCloneError に落とさない)", async () => {
+      const store = await makeStore();
+      // Proxy は assertSnapshot の検査が target に forward されるため plain-data
+      // 検証をすり抜けるが、structuredClone は失敗する。両 store で同じ error type
+      // (TypeError) に揃える。
+      const proxySnapshot = new Proxy(
+        {
+          aggregateId: "ss-09",
+          version: 1,
+          state: { count: 1 },
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+        {},
+      );
+      await expect(store.save(proxySnapshot as never)).rejects.toBeInstanceOf(TypeError);
+      expect(await store.load("ss-09")).toBeNull();
+    });
   });
 }

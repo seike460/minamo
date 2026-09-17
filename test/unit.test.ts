@@ -312,4 +312,50 @@ describe("validate (Standard Schema)", () => {
     const numberSchema = asyncNumberSchema();
     expectTypeOf(validate(numberSchema, 1)).resolves.toEqualTypeOf<number>();
   });
+
+  it("throws TypeError for malformed schema shapes (~standard / validate 欠落)", async () => {
+    // `schema["~standard"].validate` の直接参照で生 TypeError に落ちるのを防ぐ。
+    for (const bad of [
+      null,
+      42,
+      "schema",
+      {}, // ~standard 欠落
+      { "~standard": null },
+      { "~standard": {} }, // validate 欠落
+      { "~standard": { validate: 42 } }, // validate が非関数
+    ]) {
+      await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("ValidationError formats malformed issues without throwing", () => {
+    const err = new ValidationError([
+      null,
+      "oops",
+      { message: 42 },
+      { message: "ok", path: "not-an-array" },
+      { message: "deep", path: [{ key: 1 }] },
+      { path: [{ key: "x" }] },
+    ] as never);
+    expect(err.name).toBe("ValidationError");
+    expect(err.message).toContain("null");
+    expect(err.message).toContain("oops");
+    expect(err.message).toContain("42");
+    expect(err.message).toContain("ok");
+    expect(err.message).toContain("1: deep");
+    expect(err.message).toContain("x: undefined");
+    expect(err.issues).toHaveLength(6);
+  });
+
+  it("ValidationError truncates message at 2048 chars (details kept on issues)", () => {
+    const issues = Array.from({ length: 200 }, (_, i) => ({
+      message: `issue-${i}-${"x".repeat(50)}`,
+    }));
+    const err = new ValidationError(issues);
+    // 本体は 2048 文字で切り詰められ、issue 数の suffix が付く (全情報は issues に保持)
+    expect(err.message.length).toBeLessThan(2100);
+    expect(err.message).toContain("(200 issues total)");
+    expect(err.issues).toBe(issues);
+    expect(err.issues).toHaveLength(200);
+  });
 });

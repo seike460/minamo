@@ -23,7 +23,15 @@ export class InMemorySnapshotStore<TState> implements SnapshotStore<TState> {
 
   async save(snapshot: Snapshot<TState>): Promise<void> {
     assertSnapshot(snapshot);
-    this.#snapshots.set(snapshot.aggregateId, structuredClone(snapshot) as Snapshot<TState>);
+    // Proxy 等の非 cloneable な snapshot (assertPlainData は Proxy を検出できない) を
+    // 生の DataCloneError ではなく TypeError に揃える。
+    let clone: Snapshot<TState>;
+    try {
+      clone = structuredClone(snapshot);
+    } catch {
+      throw new TypeError("snapshot is not structured-cloneable");
+    }
+    this.#snapshots.set(snapshot.aggregateId, clone);
   }
 
   /** 全 snapshot を初期化する (テスト専用)。 */

@@ -54,6 +54,15 @@ describe("DynamoSnapshotStore.load envelope validation (DEC-026)", () => {
     ]);
   });
 
+  it("throws TypeError when the item is not an object", async () => {
+    // `Item: null` (mock や非標準 backend 由来) で `Object.hasOwn` の生 TypeError に
+    // 落ちないことを確認する。
+    for (const item of [null, 42, "item"]) {
+      const { store } = storeReturning({ Item: item as never });
+      await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
   it("throws TypeError when aggregateId is missing", async () => {
     const { aggregateId: _omit, ...rest } = wellFormed;
     const { store } = storeReturning({ Item: rest });
@@ -136,6 +145,24 @@ describe("DynamoSnapshotStore.save", () => {
     ]) {
       await expect(store.save(bad as never)).rejects.toBeInstanceOf(TypeError);
     }
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Proxy snapshot before send (structuredClone normalized to TypeError)", async () => {
+    const { store, send } = storeReturning({});
+    // Proxy は assertSnapshot の検査が target に forward されるため plain-data
+    // 検証をすり抜けるが、marshall 前の structuredClone は失敗する。生の
+    // DataCloneError ではなく TypeError に揃える。
+    const proxySnapshot = new Proxy(
+      {
+        aggregateId: "a-1",
+        version: 1,
+        state: { count: 1 },
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {},
+    );
+    await expect(store.save(proxySnapshot as never)).rejects.toBeInstanceOf(TypeError);
     expect(send).not.toHaveBeenCalled();
   });
 });

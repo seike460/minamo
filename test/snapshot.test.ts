@@ -382,6 +382,9 @@ describe("executeCommand + Snapshot", () => {
     const store = {
       load: () => Promise.resolve([gapTail]),
       loadFrom: (_id: string, _v: number) => Promise.resolve([gapTail]),
+      // replay が version_gap で失敗するため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
     };
     const snapshots = new InMemorySnapshotStore<number>();
     await snapshots.save({
@@ -409,6 +412,9 @@ describe("executeCommand + Snapshot", () => {
     const store = {
       load: () => Promise.resolve([]),
       loadFrom: () => Promise.resolve({ length: 1 }),
+      // loadFrom の返り値検証で失敗するため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
     };
     const snapshots = new InMemorySnapshotStore<number>();
     await snapshots.save({
@@ -441,6 +447,9 @@ describe("executeCommand + Snapshot", () => {
     };
     const store = {
       load: () => Promise.resolve([malformed]),
+      // filter 経路の検証が目的のため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
     };
     const snapshots = new InMemorySnapshotStore<number>();
     await snapshots.save({

@@ -1,6 +1,11 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { assertAggregateId, assertSnapshot, normalizePlainData } from "../../internal/guards.js";
+import {
+  assertAggregateId,
+  assertSnapshot,
+  assertTableName,
+  normalizePlainData,
+} from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { Snapshot, SnapshotStore } from "../../snapshot/types.js";
 import { resolveDocumentClient } from "./client.js";
@@ -22,6 +27,10 @@ function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
 function fromSnapshotItem<TState>(item: Record<string, unknown>): Snapshot<TState> {
   // `fromItem` (marshaller.ts) と同じく `Object.hasOwn` + 型検査を併用する:
   // unmarshall の __proto__ 汚染で prototype 経由に供給された偽装 field を弾く。
+  if (item === null || typeof item !== "object") {
+    // mock client 由来の非 object item で生 TypeError に落ちないよう防御する。
+    throw new TypeError("DynamoDB snapshot item is not an object");
+  }
   if (!Object.hasOwn(item, "aggregateId") || typeof item.aggregateId !== "string") {
     throw new TypeError(
       `DynamoDB snapshot item missing string aggregateId (got ${typeof item.aggregateId})`,
@@ -91,6 +100,8 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   readonly #tableName: string;
 
   constructor(config: DynamoSnapshotStoreConfig) {
+    // DynamoEventStore と同じく constructor 時点で tableName を検証する。
+    assertTableName(config?.tableName);
     this.#tableName = config.tableName;
     this.#doc = resolveDocumentClient(config);
   }
@@ -112,10 +123,20 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   async save(snapshot: Snapshot<TState>): Promise<void> {
     assertSnapshot(snapshot);
     const { PutCommand } = libDynamodb();
+    // marshall は send の middleware 内で非同期に走るため、caller が参照を
+    // 保持する `snapshot` をそのまま渡すと await 窓での mutation が書き込みに
+    // 混入しうる。Proxy 等の非 cloneable な snapshot (assertPlainData は Proxy を
+    // 検出できない) も生の DataCloneError ではなく TypeError に揃える。
+    let item: Snapshot<TState>;
+    try {
+      item = structuredClone(snapshot);
+    } catch {
+      throw new TypeError("snapshot is not structured-cloneable");
+    }
     await this.#doc.send(
       new PutCommand({
         TableName: this.#tableName,
-        Item: snapshot as unknown as Record<string, unknown>,
+        Item: item as unknown as Record<string, unknown>,
       }),
     );
   }

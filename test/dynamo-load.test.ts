@@ -136,6 +136,15 @@ describe("DynamoEventStore.load item envelope validation (fromItem)", () => {
     expect(Object.hasOwn(loaded[0] ?? {}, "correlationId")).toBe(false);
   });
 
+  it("throws TypeError when an item is not an object", async () => {
+    // mock client 由来の null / primitive item で `Object.hasOwn` の生 TypeError に
+    // 落ちないことを確認する (malformed response の fail-loud 化)。
+    for (const item of [null, 42, "item"]) {
+      const store = storeReturningItems([item as never]);
+      await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
   it("throws TypeError when aggregateId is absent / non-string", async () => {
     const { aggregateId: _a, ...noId } = wellFormed;
     for (const item of [noId, { ...wellFormed, aggregateId: 7 }]) {

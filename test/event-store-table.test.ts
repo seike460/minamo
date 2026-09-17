@@ -38,4 +38,18 @@ describe("createEventStoreTable", () => {
     // EventStore<TMap> として扱える（契約一致）
     expectTypeOf(orders).toMatchTypeOf<EventStore<OrderEvents>>();
   });
+
+  it("tableName が不正 → facade 生成時点で TypeError (.for() まで遅延させない)", () => {
+    for (const bad of [null, undefined, "", 42]) {
+      expect(() =>
+        createEventStoreTable({
+          tableName: bad,
+          clientConfig: { region: "local" },
+        } as never),
+      ).toThrow(TypeError);
+    }
+    // config 自体が null/undefined でも同じ TypeError に揃える
+    expect(() => createEventStoreTable(null as never)).toThrow(TypeError);
+    expect(() => createEventStoreTable(undefined as never)).toThrow(TypeError);
+  });
 });

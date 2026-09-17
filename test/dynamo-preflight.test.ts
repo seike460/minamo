@@ -101,6 +101,18 @@ describe("DynamoEventStore pre-flight", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("rejects Proxy event data as EventLimitError before send", async () => {
+    const { store, send } = counterStore();
+    // Proxy は assertPlainData の検査が target に forward されるため plain-data
+    // 検証をすり抜けるが、pre-commit の structuredClone は失敗する。生の
+    // DataCloneError ではなく append 入力制約違反 (EventLimitError) に揃える。
+    const proxyData = new Proxy({ amount: 1 }, {});
+    await expect(
+      store.append("agg-1", [{ type: "Incremented", data: proxyData }] as never, 0),
+    ).rejects.toBeInstanceOf(EventLimitError);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("rejects non-integer/negative expectedVersion before send", async () => {
     const { store, send } = counterStore();
     for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {

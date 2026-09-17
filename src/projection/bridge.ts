@@ -41,6 +41,10 @@ export function parseStreamRecord<
   eventNames: ReadonlyArray<TEventName>,
   options?: ParseStreamRecordOptions,
 ): StoredEvent<TEventName, unknown> | null {
+  // `eventNames` が非配列だと `includes` 呼び出しが生 TypeError になるため入口で弾く。
+  if (!Array.isArray(eventNames)) {
+    throw new TypeError("eventNames must be an array");
+  }
   const rec = record as {
     eventName?: string;
     dynamodb?: { NewImage?: Record<string, unknown>; Keys?: Record<string, unknown> };
@@ -62,9 +66,9 @@ export function parseStreamRecord<
   const { unmarshall } =
     requirePeer<typeof import("@aws-sdk/util-dynamodb")>("@aws-sdk/util-dynamodb");
 
-  let item: Record<string, unknown>;
+  let item: unknown;
   try {
-    item = unmarshall(newImage as Parameters<typeof unmarshall>[0]) as Record<string, unknown>;
+    item = unmarshall(newImage as Parameters<typeof unmarshall>[0]);
   } catch (err) {
     throw new InvalidStreamRecordError(
       "unmarshal_failed",
@@ -72,43 +76,59 @@ export function parseStreamRecord<
       (err as Error).message,
     );
   }
+  // NewImage が `{ NULL: true }` 等だと unmarshall は null を返す。
+  // `Object.hasOwn(null, ...)` は生 TypeError になるため missing_field に揃える。
+  if (item === null || typeof item !== "object") {
+    throw new InvalidStreamRecordError(
+      "missing_field",
+      "NewImage did not unmarshall to an item object",
+      "dynamodb.NewImage",
+    );
+  }
+  const itemRecord = item as Record<string, unknown>;
 
   // `Object.hasOwn` + 型検査の併用: unmarshall が汚染した [[Prototype]] 経由で
   // 供給された偽装 field (item.__proto__.version 等) を typeof 検査が通してしまう
   // ことを防ぐ。own property でない必須 field は存在しないものとして扱う。
-  if (!Object.hasOwn(item, "aggregateId") || typeof item.aggregateId !== "string") {
+  // aggregateId の空文字は DynamoDB partition key として成立しない (write 側の
+  // assertAggregateId と同じ契約) ため欠落扱いにする。
+  if (
+    !Object.hasOwn(itemRecord, "aggregateId") ||
+    typeof itemRecord.aggregateId !== "string" ||
+    itemRecord.aggregateId.length === 0
+  ) {
     throw new InvalidStreamRecordError(
       "missing_field",
       "aggregateId must be a string",
       "aggregateId",
     );
   }
-  if (!Object.hasOwn(item, "version") || typeof item.version !== "number") {
+  if (!Object.hasOwn(itemRecord, "version") || typeof itemRecord.version !== "number") {
     throw new InvalidStreamRecordError("missing_field", "version must be a number", "version");
   }
-  if (!Number.isInteger(item.version) || item.version < 1) {
+  if (!Number.isInteger(itemRecord.version) || itemRecord.version < 1) {
     throw new InvalidStreamRecordError(
       "missing_field",
-      `version must be an integer >= 1 (got ${String(item.version)})`,
+      `version must be an integer >= 1 (got ${String(itemRecord.version)})`,
       "version",
     );
   }
-  if (!Object.hasOwn(item, "type") || typeof item.type !== "string") {
+  if (!Object.hasOwn(itemRecord, "type") || typeof itemRecord.type !== "string") {
     throw new InvalidStreamRecordError("missing_field", "type must be a string", "type");
   }
-  if (!Object.hasOwn(item, "timestamp") || typeof item.timestamp !== "string") {
+  if (!Object.hasOwn(itemRecord, "timestamp") || typeof itemRecord.timestamp !== "string") {
     throw new InvalidStreamRecordError("missing_field", "timestamp must be a string", "timestamp");
   }
-  if (!Object.hasOwn(item, "data") || item.data === undefined) {
+  if (!Object.hasOwn(itemRecord, "data") || itemRecord.data === undefined) {
     throw new InvalidStreamRecordError("missing_field", "data attribute is required", "data");
   }
 
-  if (!(eventNames as ReadonlyArray<string>).includes(item.type)) {
+  if (!(eventNames as ReadonlyArray<string>).includes(itemRecord.type)) {
     if (options?.ignoreUnknownTypes === true) return null;
     throw new InvalidStreamRecordError(
       "unknown_type",
-      `Event type ${clip(item.type)} is not in the accepted event names`,
-      item.type,
+      `Event type ${clip(itemRecord.type)} is not in the accepted event names`,
+      itemRecord.type,
     );
   }
 
@@ -116,7 +136,7 @@ export function parseStreamRecord<
   try {
     // unmarshall 産物はネスト map の __proto__ キーで汚染されうるため clone +
     // own `__proto__` key 除去で正規化する (fromItem と同じ normalizePlainData)。
-    data = normalizePlainData(item.data);
+    data = normalizePlainData(itemRecord.data);
   } catch {
     // 非 cloneable な data は InvalidStreamRecordError に揃える (生 DataCloneError ではなく)。
     throw new InvalidStreamRecordError(
@@ -126,15 +146,15 @@ export function parseStreamRecord<
     );
   }
   const base = {
-    type: item.type as TEventName,
+    type: itemRecord.type as TEventName,
     data,
-    aggregateId: item.aggregateId,
-    version: item.version,
-    timestamp: item.timestamp,
+    aggregateId: itemRecord.aggregateId,
+    version: itemRecord.version,
+    timestamp: itemRecord.timestamp,
   };
   // correlationId も own property のみ採用する (汚染 prototype 経由の値 injection を防ぐ)。
-  return Object.hasOwn(item, "correlationId") && typeof item.correlationId === "string"
-    ? { ...base, correlationId: item.correlationId }
+  return Object.hasOwn(itemRecord, "correlationId") && typeof itemRecord.correlationId === "string"
+    ? { ...base, correlationId: itemRecord.correlationId }
     : base;
 }
 

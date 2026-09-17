@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { DynamoEventStore } from "../src/index.js";
+import { DynamoEventStore, DynamoSnapshotStore } from "../src/index.js";
 import type { CounterEvents } from "./fixtures/counter.js";
 
 /**
@@ -60,5 +60,28 @@ describe("DynamoEventStore client resolution", () => {
     const store = new DynamoEventStore<CounterEvents>({ tableName: "t", client: doc });
     expect(store).toBeInstanceOf(DynamoEventStore);
     raw.destroy();
+  });
+
+  it("tableName が不正 → constructor で TypeError (初回 service call まで持ち越さない)", () => {
+    // 空文字・非文字列・config 自体の null/undefined を同じ TypeError で弾く。
+    // DynamoDB 側の ValidationException ではなく client 側で fail-fast させる。
+    for (const bad of [null, undefined, "", 42]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: bad,
+            clientConfig: { region: "local" },
+          } as never),
+      ).toThrow(TypeError);
+      expect(
+        () =>
+          new DynamoSnapshotStore({
+            tableName: bad,
+            clientConfig: { region: "local" },
+          } as never),
+      ).toThrow(TypeError);
+    }
+    expect(() => new DynamoEventStore<CounterEvents>(null as never)).toThrow(TypeError);
+    expect(() => new DynamoSnapshotStore(null as never)).toThrow(TypeError);
   });
 });

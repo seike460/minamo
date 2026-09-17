@@ -43,10 +43,12 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     }
     assertAggregateId(aggregateId);
     assertAppendOptions(aggregateId, options);
+    // assertDomainEvents を先に呼ぶ: 非配列・null 入力に対して `events.length` の
+    // 生 TypeError ではなく "events must be an array" の EventLimitError で弾く。
+    assertDomainEvents(aggregateId, events);
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
-    assertDomainEvents(aggregateId, events);
 
     const existing = this.#streams.get(aggregateId) ?? [];
     const currentVersion = existing.length;
@@ -71,14 +73,21 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
 
     // DynamoDB の marshall round-trip と同じく、保存時に live object と切り離す (痛み C 対策)。
     // structuredClone を通せない非 plain data (関数・class instance 等) はここで fail-loud に検出
-    // される (DEC-011)。
-    const persisted = structuredClone(stored) as AnyStored[];
+    // される (DEC-011)。Proxy は assertPlainData をすり抜ける (検査が target に forward される)
+    // ため clone の失敗を append 入力制約違反として EventLimitError に揃える。
+    let persisted: AnyStored[];
+    try {
+      persisted = structuredClone(stored) as AnyStored[];
+    } catch {
+      throw new EventLimitError(aggregateId, "event data is not structured-cloneable");
+    }
     this.#streams.set(aggregateId, [...existing, ...persisted]);
     this.#insertionOrder.push(...persisted);
 
     // 返り値も clone する: `stored` は入力 `events[i].data` と参照を共有するため、
     // caller が append 後に input を mutate すると返り値が永続化内容と食い違う。
-    return structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
+    // `persisted` は clone 済みのため再度の structuredClone は失敗しない。
+    return structuredClone(persisted) as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
