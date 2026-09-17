@@ -92,6 +92,16 @@ jobs:
       - name: Generate API reference (typedoc, warnings-as-errors)
         run: pnpm run docs
 
+      - name: Upload coverage report
+        # matrix の両脚で同一内容になるため node 24 のみで 1 回だけ上げる
+        if: matrix.node == 24
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: error
+
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
