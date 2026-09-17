@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExecuteObserver } from "../src/index.js";
-import { createCommandRunner, InMemoryEventStore } from "../src/index.js";
+import { createCommandRunner, InMemoryEventStore, InMemorySnapshotStore } from "../src/index.js";
 import { type CounterEvents, counterConfig, incrementHandler } from "./fixtures/counter.js";
 
 /**
@@ -71,5 +71,37 @@ describe("createCommandRunner", () => {
 
     expect(noop.aggregate.version).toBe(1);
     expect(noop.newEvents).toHaveLength(0);
+  });
+
+  it("呼び出し時の maxRetries / correlationId が executeCommand へ転送される", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const run = createCommandRunner({ config: counterConfig, store });
+
+    const { newEvents } = await run({
+      handler: incrementHandler,
+      aggregateId: "run-6",
+      input: { amount: 2 },
+      maxRetries: 3,
+      correlationId: "corr-runner",
+    });
+
+    expect(newEvents[0]?.correlationId).toBe("corr-runner");
+  });
+
+  it("defaults の snapshotStore/snapshotPolicy が executeCommand へ転送される", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<number>();
+    const run = createCommandRunner({
+      config: counterConfig,
+      store,
+      defaults: { snapshotStore: snapshots, snapshotPolicy: { everyNEvents: 1 } },
+    });
+
+    await run({ handler: incrementHandler, aggregateId: "run-5", input: { amount: 4 } });
+
+    // everyNEvents: 1 なので v1 で snapshot が保存される → defaults 経由で配線された証拠
+    const snap = await snapshots.load("run-5");
+    expect(snap?.version).toBe(1);
+    expect(snap?.state).toBe(4);
   });
 });

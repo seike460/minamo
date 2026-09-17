@@ -98,8 +98,44 @@ describe("DynamoSnapshotStore.load envelope validation (DEC-026)", () => {
     const state = JSON.parse('{"count":1,"__proto__":{"x":9}}') as SnapState;
     const { store } = storeReturning({ Item: { ...wellFormed, state } });
     const snap = await store.load("a-1");
-    // structuredClone で正規化されるため、own "__proto__" キーも汚染 prototype も残らない
+    // structuredClone + own __proto__ key 除去で正規化されるため、
+    // own "__proto__" キーも汚染 prototype も残らない
     expect(snap?.state).toEqual({ count: 1 });
+    expect(Object.hasOwn(snap?.state ?? {}, "__proto__")).toBe(false);
     expect(Object.getPrototypeOf(snap?.state)).toBe(Object.prototype);
+  });
+
+  it("throws TypeError when state is non-cloneable (function inside)", async () => {
+    // synthetic item の state に関数が混入した場合、生 DataCloneError ではなく
+    // envelope 違反の TypeError に揃える。
+    const state = { count: 1, cb: () => 1 } as unknown as SnapState;
+    const { store } = storeReturning({ Item: { ...wellFormed, state } });
+    await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+  });
+});
+
+describe("DynamoSnapshotStore.save", () => {
+  it("sends a PutCommand with the snapshot as item", async () => {
+    const { store, send } = storeReturning({});
+    await store.save({
+      aggregateId: "a-1",
+      version: 3,
+      state: { count: 3 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a malformed snapshot before send (assertSnapshot)", async () => {
+    const { store, send } = storeReturning({});
+    for (const bad of [
+      { version: 3, state: { count: 1 }, timestamp: "t" }, // aggregateId 欠落
+      { aggregateId: "a-1", version: 0, state: { count: 1 }, timestamp: "t" }, // version <= 0
+      { aggregateId: "a-1", version: 1, timestamp: "t" }, // state 欠落
+      { aggregateId: "a-1", version: 1, state: { cb: () => 1 }, timestamp: "t" }, // 非 plain state
+    ]) {
+      await expect(store.save(bad as never)).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(send).not.toHaveBeenCalled();
   });
 });

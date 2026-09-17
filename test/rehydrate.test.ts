@@ -163,4 +163,8 @@ describe("rehydrate", () => {
       expect(e.reason).toBe("invalid_initial_version");
     }
   });
+
+  it("CT-RH-13 non-array events input throws TypeError", () => {
+    expect(() => rehydrate(counterConfig, "agg-1", "not-an-array" as never)).toThrow(TypeError);
+  });
 });

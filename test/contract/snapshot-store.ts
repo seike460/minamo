@@ -118,7 +118,11 @@ export function registerSnapshotStoreContract(ctx: SnapshotContractContext): voi
         timestamp: "2026-01-01T00:00:00.000Z",
       };
       // load 側で弾ける shape を書き込ませない (書いた snapshot は二度と読めない)
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
       const malformed = [
+        null,
+        "not-an-object",
         { ...base, aggregateId: "" },
         { ...base, version: 0 },
         { ...base, version: 1.5 },
@@ -126,6 +130,9 @@ export function registerSnapshotStoreContract(ctx: SnapshotContractContext): voi
         { ...base, state: undefined },
         { aggregateId: "ss-06", version: 1, timestamp: base.timestamp }, // state 欠落
         { aggregateId: "ss-06", version: 1, state: base.state }, // timestamp 欠落
+        // state の非 plain data も write 側で弾く (assertPlainData と同じ契約)
+        { ...base, state: { at: new Date(0) } },
+        { ...base, state: circular },
       ];
       for (const bad of malformed) {
         await expect(store.save(bad as never)).rejects.toBeInstanceOf(TypeError);

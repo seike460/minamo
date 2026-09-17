@@ -148,16 +148,18 @@ function assertPlainDataValue(
     if (typeof value === "number") {
       if (Number.isFinite(value)) return;
       fail("non-finite number is not DynamoDB marshallable");
-    } else if (typeof value === "bigint") {
+    }
+    if (typeof value === "bigint") {
       fail("bigint is written as N but read back as number (type is lost)");
-    } else {
-      fail(
+    }
+    // fail() 経由の never はここでは CFA に効かないため直接 throw で終端する
+    throw new TypeError(
+      `${path} must be plain data: ${
         value === undefined
           ? "undefined is dropped by DynamoDB marshall"
-          : `${typeof value} is not persistable`,
-      );
-    }
-    return; // fail() は never だが CFA のため明示的に終端する
+          : `${typeof value} is not persistable`
+      }`,
+    );
   }
   // 以降 value は object
   if (depth > MAX_PLAIN_DATA_DEPTH) fail(`exceeds ${MAX_PLAIN_DATA_DEPTH}-level nesting limit`);

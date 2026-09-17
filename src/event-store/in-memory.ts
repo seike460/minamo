@@ -16,10 +16,10 @@ type AnyStored = StoredEvent<string, unknown>;
  * - DynamoEventStore と同じ汎用制約を実装する (version 検証、ギャップ検出、
  *   ConcurrencyError、空配列で EventLimitError、fresh read 保証)
  * - DynamoDB 固有のサイズ制約 (400KB / 4MB) は検証しない (DEC-006)
- * - Contract Tests (CT-01〜20) で DynamoEventStore との振る舞い一致を保証する
+ * - Contract Tests (CT-01〜22) で DynamoEventStore との振る舞い一致を保証する
  * - append 入力と load/loadFrom/allEvents の返り値は structuredClone で caller と切り離す
- *   (DynamoDB の marshall/unmarshall 相当の隔離)。structuredClone 不可能な非 plain data
- *   (関数・class instance 等、DEC-011 違反) は `DataCloneError` で伝播する
+ *   (DynamoDB の marshall/unmarshall 相当の隔離)。非 plain data (関数・class instance 等、
+ *   DEC-011 違反) は `assertDomainEvents` → `assertPlainData` が `TypeError` で fail-loud に弾く
  *
  * 本番環境では使わないこと。`allEvents` / `clear` はテスト専用。
  *

@@ -118,6 +118,23 @@ describe("ConcurrencyError", () => {
     const err = new ConcurrencyError("agg-2", 10);
     expect(err.stack).toBeDefined();
   });
+
+  it("clips control characters and oversized aggregateId in the message", () => {
+    // stream 由来の untrusted 値を message に埋め込む際、改行注入と巨大化を防ぐ。
+    const err = new ConcurrencyError(`line1\nline2\t${"x".repeat(300)}`, 1);
+    expect(err.message).not.toContain("\n");
+    expect(err.message).not.toContain("\t");
+    expect(err.message.length).toBeLessThan(350); // clip 上限 256 + prefix
+    expect(err.message).toContain("\\n"); // escaped 表現として残る
+  });
+
+  it("falls back to <unprintable> when aggregateId's toString throws", () => {
+    // clip の try/catch fallback: Object.create(null) や投げる toString を持つ
+    // malformed 値でも message 構築自体は失敗しない。
+    const unprintable = Object.create(null) as string;
+    const err = new ConcurrencyError(unprintable, 0);
+    expect(err.message).toContain("<unprintable>");
+  });
 });
 
 // Standard Schema conformant test doubles: Zod / Valibot / ArkType に依存せず
@@ -201,6 +218,17 @@ describe("ValidationError", () => {
     const err = new ValidationError(issues);
     expect(err.issues).toBe(issues);
   });
+
+  it("formats malformed (spec-noncompliant) issues without throwing", () => {
+    // vendor が null 要素・非配列 path・非文字列 message を返しても
+    // formatIssue が生 TypeError に落ちないことを保証する。
+    const err = new ValidationError([
+      null,
+      { message: 42, path: "not-an-array" },
+      { message: "ok" },
+    ] as never);
+    expect(err.message).toBe("Validation failed: null; 42; ok");
+  });
 });
 
 describe("validate (Standard Schema)", () => {
@@ -257,6 +285,19 @@ describe("validate (Standard Schema)", () => {
         version: 1 as const,
         vendor: "bad",
         validate: () => ({}),
+      },
+    };
+    await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("throws TypeError when a schema returns a non-object result", async () => {
+    // Standard Schema 非準拠の null / primitive 返却を防御: issues/value の
+    // property access で生 TypeError になるのを防ぐ。
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => null,
       },
     };
     await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);

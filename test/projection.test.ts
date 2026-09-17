@@ -212,6 +212,36 @@ describe("parseStreamRecord", () => {
     const result = parseStreamRecord<CounterEvents, "Incremented">(insertRecord(), ["Incremented"]);
     expectTypeOf(result).toEqualTypeOf<StoredEvent<"Incremented", unknown> | null>();
   });
+
+  it("CT-PB-16 throws missing_field when type or timestamp is absent", () => {
+    // type / timestamp の欠落も missing_field で detail に field 名が入る。
+    const noType = insertRecord({
+      aggregateId: "agg-1",
+      version: 1,
+      data: {},
+      timestamp: "2026-04-17T00:00:00.000Z",
+    });
+    const noTimestamp = insertRecord({
+      aggregateId: "agg-1",
+      version: 1,
+      type: "Incremented",
+      data: {},
+    });
+    for (const [bad, detail] of [
+      [noType, "type"],
+      [noTimestamp, "timestamp"],
+    ] as const) {
+      try {
+        parseStreamRecord<CounterEvents>(bad, acceptedNames);
+        expect.fail(`expected throw for missing ${detail}`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(InvalidStreamRecordError);
+        const e = err as InvalidStreamRecordError;
+        expect(e.reason).toBe("missing_field");
+        expect(e.detail).toBe(detail);
+      }
+    }
+  });
 });
 
 describe("eventNamesOf", () => {

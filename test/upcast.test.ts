@@ -248,4 +248,27 @@ describe("upcasting (AggregateConfig.upcast)", () => {
     expect(result.aggregate.state).toBe(18);
     expect(result.aggregate.version).toBe(3);
   });
+
+  it("upcast が replay 不可能な shape を返したら TypeError", () => {
+    // upcast 出力も evolve 可能な最小 shape (string type + own data) を要求する。
+    const stream = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ] as unknown as ReadonlyArray<StoredEvent<"Incremented", { amount: number }>>;
+    for (const returned of [
+      { aggregateId: "c1", version: 1 }, // type 欠落
+      { aggregateId: "c1", version: 1, type: "Incremented" }, // data 欠落
+    ]) {
+      const config: AggregateConfig<number, CounterEvents> = {
+        ...configNoUpcast,
+        upcast: () => returned as never,
+      };
+      expect(() => rehydrate(config, "c1", stream)).toThrow(TypeError);
+    }
+  });
 });

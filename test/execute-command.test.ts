@@ -430,6 +430,47 @@ describe("executeCommand", () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 
+  it("CT-EC-33 EventStore.load が malformed な event (非文字列 type / data 欠落) を返す → TypeError", async () => {
+    for (const bad of [
+      { aggregateId: "agg-1", version: 1, type: 42, data: {} },
+      { aggregateId: "agg-1", version: 1, type: "Incremented" },
+    ]) {
+      const store = {
+        async load() {
+          return [bad] as never;
+        },
+        async append() {
+          return [];
+        },
+      };
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store: store as never,
+          handler: incrementHandler,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("CT-EC-32 handler が空文字列 / 欠落の type を返す → TypeError (store 未到達)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    for (const badType of ["", undefined] as const) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: () => [{ type: badType, data: { amount: 1 } }] as never,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(await store.load("agg-1")).toHaveLength(0);
+  });
+
   it("CT-EC-26 retry は stream を再読込し、競合分を含む state と進んだ expectedVersion で append する", async () => {
     // FailOnceAndAdvance: 1 回目の append で他者の書き込み (amount: 10) を commit
     // してから衝突を返す。再 load を省いた退化実装では 2 回目の handler が

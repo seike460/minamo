@@ -99,7 +99,7 @@ describe("DynamoDB Local availability", () => {
 });
 
 /**
- * U4 Contract Tests (CT-01〜20) を DynamoEventStore 対象で実行。
+ * U4 Contract Tests (CT-01〜22) を DynamoEventStore 対象で実行。
  *
  * 同 aggregateId で append → concurrent write 衝突を避けるため、各 case の
  * `makeStore` は新しい (aggregateId 空間を共有する) store instance を返す。

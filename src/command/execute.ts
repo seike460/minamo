@@ -148,6 +148,7 @@ function replayEvents<TState, TMap extends EventMap>(
 
   let state = baseState;
   for (const e of normalized) {
+    // 上の hasEvolveHandler 検証で own callable handler の存在は保証済み (防御的に undefined を除く)
     const handler = config.evolve[e.type as keyof TMap & string];
     if (handler === undefined) continue;
     state = handler(

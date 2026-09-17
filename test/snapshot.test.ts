@@ -502,4 +502,60 @@ describe("executeCommand + Snapshot", () => {
     // observer の失敗にもかかわらず snapshot は保存されている (finally 経路)
     expect(await snapshots.load("agg-oc")).not.toBeNull();
   });
+
+  it("custom SnapshotStore が非文字列 timestamp の snapshot を返したら TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    for (const badTimestamp of [undefined, 123, null]) {
+      const badSnapshots = {
+        async load() {
+          return {
+            aggregateId: "agg-ts",
+            version: 1,
+            state: 0,
+            timestamp: badTimestamp,
+          };
+        },
+        async save() {},
+        async clear() {},
+      };
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-ts",
+          input: { amount: 1 },
+          snapshotStore: badSnapshots as never,
+          snapshotPolicy: { everyNEvents: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("custom SnapshotStore が非 cloneable な state を返したら TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const badSnapshots = {
+      async load() {
+        return {
+          aggregateId: "agg-nc",
+          version: 1,
+          state: { fn: () => 1 },
+          timestamp: "2026-04-17T00:00:00.000Z",
+        };
+      },
+      async save() {},
+      async clear() {},
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-nc",
+        input: { amount: 1 },
+        snapshotStore: badSnapshots as never,
+        snapshotPolicy: { everyNEvents: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
 });

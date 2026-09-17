@@ -3,7 +3,7 @@ import type { EventMap, EventStore } from "../../src/index.js";
 import { ConcurrencyError, EventLimitError } from "../../src/index.js";
 
 /**
- * Event Store Contract Tests (CT-01 〜 CT-20)。
+ * Event Store Contract Tests (CT-01 〜 CT-22)。
  *
  * 単一 suite を InMemoryEventStore と DynamoEventStore の両方で実行し、
  * concept.md §1 痛み C (InMemory と本番の振る舞い差異) を構造的に抑え込む。
@@ -29,6 +29,13 @@ export interface ContractContext<TMap extends EventMap> {
    * DynamoDB Local 等の外部依存が無い環境で contract suite が red にならないようにする。
    */
   readonly isAvailable?: () => boolean;
+}
+
+/** `depth` 階層のネストした plain object を作る (深さ上限検証用)。 */
+function makeNested(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = { leaf: 1 };
+  for (let i = 0; i < depth; i++) value = { next: value };
+  return value;
 }
 
 /**
@@ -352,6 +359,8 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
           })(),
         ],
         ["nested function", { cb: () => 1 }],
+        ["enumerable symbol key (marshall が落とす)", { [Symbol("k")]: 1 }],
+        ["深さ 32 超過 (DynamoDB 上限)", makeNested(40)],
       ];
       for (const [name, data] of cases) {
         await expect(
@@ -376,6 +385,9 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
         // Uint8Array を返し型が変わる。JSON.stringify でも {"type":"Buffer"} に変化)。
         ["Buffer (Uint8Array subclass、DEC-011 禁止)", Buffer.from([1, 2])],
         ["Uint8Array subclass", new (class extends Uint8Array {})([1])],
+        // constructor を持たない null-proto object を prototype に持つ非 plain object。
+        // 診断 message の `?? "unknown prototype"` 経路も通ることを確認する。
+        ["object with null-prototype prototype", Object.create(Object.create(null))],
       ];
       for (const [name, data] of cases) {
         await expect(
