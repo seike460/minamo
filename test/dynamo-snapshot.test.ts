@@ -86,12 +86,13 @@ describe("DynamoSnapshotStore.load envelope validation (DEC-026)", () => {
     await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
   });
 
-  it.each([
-    0, -1, 1.5,
-  ])("throws TypeError when version is %s (non-positive/non-integer)", async (v) => {
-    const { store } = storeReturning({ Item: { ...wellFormed, version: v } });
-    await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
-  });
+  it.each([0, -1, 1.5])(
+    "throws TypeError when version is %s (non-positive/non-integer)",
+    async (v) => {
+      const { store } = storeReturning({ Item: { ...wellFormed, version: v } });
+      await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+    },
+  );
 
   it("rejects fields forged through [[Prototype]] (util-dynamodb __proto__ pollution)", async () => {
     // unmarshall は "__proto__" キーで返り値の [[Prototype]] を汚染する。

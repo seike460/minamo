@@ -56,7 +56,7 @@ export function parseStreamRecord<
     dynamodb?: { NewImage?: Record<string, unknown>; Keys?: Record<string, unknown> };
   } | null;
 
-  if (!rec || rec.eventName !== "INSERT") return null;
+  if (rec?.eventName !== "INSERT") return null;
 
   const newImage = rec.dynamodb?.NewImage;
   if (newImage === undefined || newImage === null) {
