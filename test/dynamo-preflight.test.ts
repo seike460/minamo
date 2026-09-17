@@ -86,4 +86,57 @@ describe("DynamoEventStore pre-flight", () => {
     });
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("rejects non-plain data before send (no post-commit DataCloneError)", async () => {
+    const { store, send } = counterStore();
+    // ネストに関数値を含む data: assertPlainData が再帰検証で send 前に弾く。
+    // commit 後の失敗で「書き込み済みなのに失敗に見える」状態を防ぐ防衛線。
+    await expect(
+      store.append(
+        "agg-1",
+        [{ type: "Incremented", data: { amount: 1, fn: () => 1 } as never }],
+        0,
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects Proxy event data as EventLimitError before send", async () => {
+    const { store, send } = counterStore();
+    // Proxy は assertPlainData の検査が target に forward されるため plain-data
+    // 検証をすり抜けるが、pre-commit の structuredClone は失敗する。生の
+    // DataCloneError ではなく append 入力制約違反 (EventLimitError) に揃える。
+    const proxyData = new Proxy({ amount: 1 }, {});
+    await expect(
+      store.append("agg-1", [{ type: "Incremented", data: proxyData }] as never, 0),
+    ).rejects.toBeInstanceOf(EventLimitError);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-integer/negative expectedVersion before send", async () => {
+    const { store, send } = counterStore();
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        store.append("agg-1", [{ type: "Incremented", data: { amount: 1 } }], bad),
+      ).rejects.toBeInstanceOf(EventLimitError);
+    }
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("propagates correlationId to every stored event in the batch", async () => {
+    const { store, send } = counterStore();
+    const out = await store.append(
+      "agg-1",
+      [
+        { type: "Incremented", data: { amount: 1 } },
+        { type: "Incremented", data: { amount: 2 } },
+      ],
+      0,
+      { correlationId: "corr-1" },
+    );
+    expect(send).toHaveBeenCalledOnce();
+    for (const e of out) {
+      expect(e.correlationId).toBe("corr-1");
+    }
+  });
 });

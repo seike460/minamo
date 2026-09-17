@@ -1,4 +1,6 @@
 import type { StoredEvent } from "../../core/types.js";
+import { EventLimitError } from "../../errors.js";
+import { isObjectRecord, normalizePlainData } from "../../internal/guards.js";
 
 /**
  * DynamoDB item の shape。`DynamoDBDocumentClient` が marshall/unmarshall を担うため
@@ -46,27 +48,59 @@ export function toItem(stored: StoredEvent<string, unknown>): EventItem {
  * 余分な attribute は無視する (future-compat)。
  */
 export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unknown> {
-  if (typeof raw.aggregateId !== "string") {
+  // `Object.hasOwn` + 型検査の両方を行う: `@aws-sdk/util-dynamodb` の unmarshall は
+  // `"__proto__"` キーを持つ item を受けると返り値 object の [[Prototype]] を汚染する
+  // (acc[key]= の変異が __proto__ setter を踏む)。typeof 検査だけだと prototype 経由で
+  // 供給された偽装 field を受理してしまうため、own property であることを必須にする。
+  if (!isObjectRecord(raw)) {
+    // mock client 由来の非 object item (null 要素・配列等) で `Object.hasOwn` の
+    // 生 TypeError に落ちないよう防御する。
+    throw new TypeError("DynamoDB item is not an object");
+  }
+  if (!Object.hasOwn(raw, "aggregateId") || typeof raw.aggregateId !== "string") {
     throw new TypeError(`DynamoDB item missing string aggregateId (got ${typeof raw.aggregateId})`);
   }
-  if (typeof raw.version !== "number") {
+  if (!Object.hasOwn(raw, "version") || typeof raw.version !== "number") {
     throw new TypeError(`DynamoDB item missing numeric version (got ${typeof raw.version})`);
   }
-  if (typeof raw.type !== "string") {
+  if (!Number.isInteger(raw.version) || raw.version < 1) {
+    throw new TypeError(`DynamoDB item has invalid version (got ${String(raw.version)})`);
+  }
+  if (!Object.hasOwn(raw, "type") || typeof raw.type !== "string") {
     throw new TypeError(`DynamoDB item missing string type (got ${typeof raw.type})`);
   }
-  if (typeof raw.timestamp !== "string") {
+  if (!Object.hasOwn(raw, "timestamp") || typeof raw.timestamp !== "string") {
     throw new TypeError(`DynamoDB item missing string timestamp (got ${typeof raw.timestamp})`);
   }
+  // `data` 属性の欠落は受理する: v0.2.0 は `data: undefined` の event を
+  // removeUndefinedValues で `data` 属性ごと落として永続化していたため、data 属性を
+  // 持たない legacy item が実在する。write 側も `data: undefined` を受理して
+  // 同じ形式で永続化する (assertDomainEvents は data が存在する場合のみ plain-data
+  // を要求) — read 側では `data: undefined` として復元する。
+  const rawData = Object.hasOwn(raw, "data") ? raw.data : undefined;
 
+  let data: unknown;
+  try {
+    data = rawData === undefined ? undefined : normalizePlainData(rawData);
+  } catch {
+    // 非 cloneable な data (synthetic item での関数混入等) は生の DataCloneError
+    // ではなく envelope 違反として TypeError に揃える。
+    throw new TypeError("DynamoDB item has non-cloneable data attribute");
+  }
   const base = {
     aggregateId: raw.aggregateId,
     version: raw.version,
     type: raw.type,
-    data: raw.data,
+    // structuredClone + own __proto__ key の再帰除去で正規化する (unmarshall 産物は
+    // ネストした map 内の __proto__ キーで [[Prototype]] が汚染されうる。
+    // clone は汚染 prototype を落とすが own `__proto__` data key は保持するため
+    // normalizePlainData で除去する)。
+    data,
     timestamp: raw.timestamp,
   };
-  return raw.correlationId !== undefined && typeof raw.correlationId === "string"
+  // correlationId も own property を要求する: 汚染された [[Prototype]] 経由の
+  // 値を stored event に載せない (値 injection 防止)。
+  return Object.hasOwn(raw, "correlationId") && typeof raw.correlationId === "string"
     ? { ...base, correlationId: raw.correlationId }
     : base;
 }
@@ -77,5 +111,16 @@ export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unkn
  * とは完全一致しないため `SIZE_SLACK_BYTES` で overshoot を防ぐ運用。
  */
 export function approxItemSize(stored: StoredEvent<string, unknown>): number {
-  return new TextEncoder().encode(JSON.stringify(toItem(stored))).length;
+  let json: string;
+  try {
+    json = JSON.stringify(toItem(stored));
+  } catch (cause) {
+    // BigInt / circular 参照など JSON 非直列化の入力は DEC-011 違反。raw TypeError ではなく
+    // append 入力制約違反として EventLimitError に wrap して診断しやすくする。
+    throw new EventLimitError(
+      stored.aggregateId,
+      `event data is not JSON-serializable: ${(cause as Error).message}`,
+    );
+  }
+  return new TextEncoder().encode(json).length;
 }

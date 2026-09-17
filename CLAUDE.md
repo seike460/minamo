@@ -4,12 +4,13 @@
 - minamo -- Type-safe CQRS+ES for AWS Serverless
 - npm: @seike460/minamo | GitHub: seike460/minamo | License: MIT
 
-## Current Phase: Released / v0.1.x Maintenance
-- Published: npm `@seike460/minamo` (0.1.x line, public API frozen per concept.md §5)
-- Concept: docs/concept.md (approved)
+## Current Phase: Released / v0.2.0 (v1 機能実装完了, v0.3/v0.4 = 安定性窓)
+- Published: npm `@seike460/minamo` v0.2.0。v1 機能群 (U10〜U18: observability / runner / facade / RetryExhaustedError / upcasting / SnapshotStore / loadFrom / snapshot 統合) を単一 v0.2.0 で一括導入済み (DEC-025)。公開 API は concept.md §5 に逐字従属
+- Concept: docs/concept.md (approved。§5.10〜5.13 が v0.2.0 機能の正本)
 - Design principles: docs/concept.md §4 "設計の姿勢"
-- Detailed design: docs/design/v0.1.0.md (§5 実装計画・モジュール構造・test strategy)
-- Future work: docs/roadmap.md (v0.2.x candidates, not committed)
+- Detailed design: docs/design/v0.1.0.md (v0.1.0 コア) / docs/design/v0.2.0.md (v1 機能 U10〜U18)
+- Roadmap: docs/roadmap-v1.md (v1.0.0 到達シーケンスと卒業条件) / docs/roadmap.md (軽量 backlog)
+- 残る v1.0.0 障壁は非コードの卒業条件 (3-minor 安定窓 / 外部採用 ≥1 / co-maintainer ≥1)
 
 ## Toolchain
 - Build: tsdown (Rolldown-based, ESM-only output)

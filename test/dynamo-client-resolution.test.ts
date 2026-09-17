@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { DynamoEventStore } from "../src/index.js";
+import { DynamoEventStore, DynamoSnapshotStore } from "../src/index.js";
 import type { CounterEvents } from "./fixtures/counter.js";
 
 /**
@@ -60,5 +60,55 @@ describe("DynamoEventStore client resolution", () => {
     const store = new DynamoEventStore<CounterEvents>({ tableName: "t", client: doc });
     expect(store).toBeInstanceOf(DynamoEventStore);
     raw.destroy();
+  });
+
+  it("tableName が不正 → constructor で TypeError (初回 service call まで持ち越さない)", () => {
+    // 空文字・非文字列・config 自体の null/undefined を同じ TypeError で弾く。
+    // DynamoDB 側の ValidationException ではなく client 側で fail-fast させる。
+    for (const bad of [null, undefined, "", 42]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: bad,
+            clientConfig: { region: "local" },
+          } as never),
+      ).toThrow(TypeError);
+      expect(
+        () =>
+          new DynamoSnapshotStore({
+            tableName: bad,
+            clientConfig: { region: "local" },
+          } as never),
+      ).toThrow(TypeError);
+    }
+    expect(() => new DynamoEventStore<CounterEvents>(null as never)).toThrow(TypeError);
+    expect(() => new DynamoSnapshotStore(null as never)).toThrow(TypeError);
+  });
+
+  it("client が send を持たない / clientConfig が非 object → constructor で TypeError", () => {
+    // `send` 欠落の client は初回 `.send()` まで設定ミスが持ち越されるため弾く。
+    // 非 object の clientConfig は SDK constructor への素通りで SDK 実装依存の
+    // 挙動になるため、エラー有無をライブラリ側で決定的にする。
+    for (const badClient of [{}, null, 42, { send: "not-a-function" }]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: "t",
+            client: badClient as never,
+          }),
+      ).toThrow(TypeError);
+      expect(() => new DynamoSnapshotStore({ tableName: "t", client: badClient as never })).toThrow(
+        TypeError,
+      );
+    }
+    for (const badConfig of [42, "cfg", []]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: "t",
+            clientConfig: badConfig as never,
+          }),
+      ).toThrow(TypeError);
+    }
   });
 });

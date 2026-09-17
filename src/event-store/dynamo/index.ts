@@ -1,14 +1,40 @@
-import { TransactionCanceledException } from "@aws-sdk/client-dynamodb";
-import {
-  type DynamoDBDocumentClient,
-  QueryCommand,
-  TransactWriteCommand,
-} from "@aws-sdk/lib-dynamodb";
-import type { EventMap, EventsOf, StoredEvent, StoredEventsOf } from "../../core/types.js";
+import type { DynamoDBDocumentClient, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import type { EventMap, EventsOf, StoredEventsOf } from "../../core/types.js";
 import { ConcurrencyError, EventLimitError } from "../../errors.js";
+import {
+  assertAfterVersion,
+  assertAggregateId,
+  assertAppendOptions,
+  assertDomainEvents,
+  assertTableName,
+  normalizePlainData,
+} from "../../internal/guards.js";
+import { requirePeer } from "../../internal/require-peer.js";
 import type { AppendOptions, EventStore } from "../types.js";
 import { type DynamoEventStoreConfig, resolveDocumentClient } from "./client.js";
 import { approxItemSize, fromItem, toItem } from "./marshaller.js";
+
+/** `@aws-sdk/lib-dynamodb` を遅延解決する (optional peer / DEC-027)。 */
+function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
+  return requirePeer("@aws-sdk/lib-dynamodb");
+}
+
+/**
+ * `err` が `TransactionCanceledException` かを name + instanceof の双方で判定する。
+ * `@aws-sdk/client-dynamodb` が解決不能 (mock client 持参かつ SDK 未 install)
+ * のとき instanceof 側は false に倒し、元の error をマスクしない。
+ */
+function isTransactionCanceledException(err: unknown): boolean {
+  if ((err as Error | undefined)?.name === "TransactionCanceledException") return true;
+  try {
+    const { TransactionCanceledException } = requirePeer<typeof import("@aws-sdk/client-dynamodb")>(
+      "@aws-sdk/client-dynamodb",
+    );
+    return err instanceof TransactionCanceledException;
+  } catch {
+    return false;
+  }
+}
 
 /** TransactWriteItems の 100 actions 上限 − ConditionCheck 1 ops 余地 (R15 / C12)。 */
 const MAX_EVENTS_PER_APPEND = 99;
@@ -48,6 +74,10 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
   readonly #tableName: string;
 
   constructor(config: DynamoEventStoreConfig) {
+    // 空文字・非文字列の tableName を constructor 時点で弾き、初回 service call まで
+    // 設定ミスが持ち越されないようにする (config 自体の null/undefined も同じ
+    // TypeError に揃える)。
+    assertTableName(config?.tableName);
     this.#tableName = config.tableName;
     this.#doc = resolveDocumentClient(config);
   }
@@ -58,6 +88,17 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     expectedVersion: number,
     options?: AppendOptions,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw new EventLimitError(
+        aggregateId,
+        `expectedVersion must be a non-negative integer (got ${String(expectedVersion)})`,
+      );
+    }
+    assertAggregateId(aggregateId);
+    assertAppendOptions(aggregateId, options);
+    // assertDomainEvents を先に呼ぶ: 非配列・null 入力に対して `events.length` の
+    // 生 TypeError ではなく "events must be an array" の EventLimitError で弾く。
+    assertDomainEvents(aggregateId, events);
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
@@ -69,25 +110,45 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     }
 
     const timestamp = new Date().toISOString();
-    const stored: StoredEvent<string, unknown>[] = events.map((e, i) => {
-      const base = {
-        type: e.type,
-        data: e.data,
-        aggregateId,
-        version: expectedVersion + i + 1,
-        timestamp,
-      } as const;
-      return options?.correlationId !== undefined
-        ? { ...base, correlationId: options.correlationId }
-        : base;
-    });
+
+    // 正規化は検証・send の前に行う: 入力 `events[i].data` は caller と参照を共有する
+    // ため、size 検証・marshall・返り値をすべて正規化済みの clone (`out`) 側に揃える。
+    // `normalizePlainData` は clone + own `__proto__`・`undefined` 値 key の除去を行い、
+    // marshall の `removeUndefinedValues` と同じ正規化を永続化・返り値の双方に適用する
+    // (InMemoryEventStore と byte 同一の persisted form)。こうしないと「検証した内容」と
+    // 「実際に marshall した内容」が別オブジェクトになり、async の marshall 窓で caller が
+    // 入力を mutate した場合に書き込み内容が検証結果と食い違う。`data: undefined` は
+    // key を残したまま `undefined` になり、marshall 側で属性ごと落ちる (v0.2.0 と同じ
+    // 永続化形式)。
+    // clone 不可能な data (関数値・Proxy 等、DEC-011 違反) はここで pre-commit に失敗する。
+    // assertPlainData は Proxy を検出できない (prototype/keys は target に forward される)
+    // ため、clone の失敗を append 入力制約違反として EventLimitError に揃える。
+    let out: ReadonlyArray<StoredEventsOf<TMap>>;
+    try {
+      out = events.map((e, i) => {
+        const base = {
+          type: e.type,
+          data: normalizePlainData(e.data),
+          aggregateId,
+          version: expectedVersion + i + 1,
+          timestamp,
+        } as const;
+        return options?.correlationId !== undefined
+          ? { ...base, correlationId: options.correlationId }
+          : base;
+      }) as StoredEventsOf<TMap>[];
+    } catch {
+      throw new EventLimitError(aggregateId, "event data is not structured-cloneable");
+    }
 
     let totalSize = 0;
-    for (let i = 0; i < stored.length; i++) {
-      const event = stored[i];
+    for (let i = 0; i < out.length; i++) {
+      const event = out[i];
       if (event === undefined) continue;
       const itemSize = approxItemSize(event);
-      if (itemSize > MAX_ITEM_SIZE_BYTES) {
+      // 4MB transaction チェックと同じく slack を引く: approxItemSize は JSON byte 近似で、
+      // attribute name 等の実オーバーヘッドを含まない。境界値の false-accept を防ぐ。
+      if (itemSize + SIZE_SLACK_BYTES > MAX_ITEM_SIZE_BYTES) {
         throw new EventLimitError(
           aggregateId,
           `event at index ${i} exceeds 400KB item size limit (approx ${itemSize} bytes)`,
@@ -102,7 +163,7 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       );
     }
 
-    const transactItems: TransactWriteCommand["input"]["TransactItems"] = stored.map((e) => ({
+    const transactItems: TransactWriteCommand["input"]["TransactItems"] = out.map((e) => ({
       Put: {
         TableName: this.#tableName,
         Item: toItem(e) as unknown as Record<string, unknown>,
@@ -125,22 +186,39 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       });
     }
 
+    const { TransactWriteCommand: TransactWrite } = libDynamodb();
     try {
-      await this.#doc.send(new TransactWriteCommand({ TransactItems: transactItems }));
+      await this.#doc.send(new TransactWrite({ TransactItems: transactItems }));
     } catch (err) {
+      // instanceof だけでなく name でも判定する: consumer 持参の client が別コピーの
+      // SDK から来た場合 (pnpm link / npm link の二重インスタンス、pitfalls §5)、
+      // instanceof は false になるが構造は同じため name で拾う。
+      const reasons = (
+        err as { CancellationReasons?: ReadonlyArray<{ Code?: string }> } | undefined
+      )?.CancellationReasons;
+      // ConditionalCheckFailed: expectedVersion の楽観的ロック違反。
+      // TransactionConflict: 同一 item への並行 transaction との衝突。全 TransactItem が
+      // 単一 aggregate のキーを指すため、これは同一 stream への同時書き込み競合を意味し、
+      // transaction は rollback 済みなので retry して安全 (ConcurrencyError と同じ扱い)。
       if (
-        err instanceof TransactionCanceledException &&
-        err.CancellationReasons?.some((r) => r.Code === "ConditionalCheckFailed")
+        isTransactionCanceledException(err) &&
+        // 手作りの fake error でも catch 内で生 TypeError に置き換わらないよう防御する
+        // (非配列 / null 要素)。
+        Array.isArray(reasons) &&
+        reasons.some(
+          (r) => r?.Code === "ConditionalCheckFailed" || r?.Code === "TransactionConflict",
+        )
       ) {
         throw new ConcurrencyError(aggregateId, expectedVersion);
       }
       throw err;
     }
 
-    return stored as ReadonlyArray<StoredEventsOf<TMap>>;
+    return out;
   }
 
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
     return this.#query("aggregateId = :id", { ":id": aggregateId });
   }
 
@@ -152,6 +230,8 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     aggregateId: string,
     afterVersion: number,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
+    assertAfterVersion(afterVersion);
     return this.#query("aggregateId = :id AND version > :v", {
       ":id": aggregateId,
       ":v": afterVersion,
@@ -166,6 +246,7 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
+    const { QueryCommand } = libDynamodb();
     do {
       const result = await this.#doc.send(
         new QueryCommand({
