@@ -102,6 +102,28 @@ describe("ProjectedEventStore", () => {
     expect(loaded).toHaveLength(1);
     expect(loaded[0]?.data).toEqual({ amount: 2 });
   });
+
+  it("delegates loadFrom when the inner store implements it", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    await inner.append("counter-1", [{ type: "Counter.Incremented", data: { amount: 2 } }], 0);
+    await inner.append("counter-1", [{ type: "Counter.Incremented", data: { amount: 3 } }], 1);
+    const store = new ProjectedEventStore<CounterEvents>(inner, () => {});
+
+    const loaded = await store.loadFrom?.("counter-1", 1);
+    expect(loaded).toHaveLength(1);
+    expect(loaded?.[0]?.version).toBe(2);
+    expect(loaded?.[0]?.data).toEqual({ amount: 3 });
+  });
+
+  it("leaves loadFrom absent when the inner store does not implement it", () => {
+    const inner: EventStore<CounterEvents> = {
+      append: () => Promise.resolve([]),
+      load: () => Promise.resolve([]),
+    };
+    const store = new ProjectedEventStore<CounterEvents>(inner, () => {});
+
+    expect(store.loadFrom).toBeUndefined();
+  });
 });
 
 describe("createCommandRunner", () => {

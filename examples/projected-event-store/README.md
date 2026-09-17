@@ -33,7 +33,9 @@ Projection total: 9
 
 1. **Decorator パターンで projection を結合**: `EventStore<TMap>` を実装したまま
    append 後の hook を差し込める。`InMemoryEventStore` でも `DynamoEventStore` でも
-   透過的に wrap できる
+   透過的に wrap できる。optional method `loadFrom` (§5.10, snapshot 起点の部分
+   rehydration) も inner が実装していれば delegate するため、wrap で optimization が
+   静かに失われない
 2. **projection 失敗は swallow する設計**: `onAppended` が throw しても append は
    roll back しない。DynamoDB Streams の非同期セマンティクス (projection 失敗は
    append を巻き戻さない) と揃えるための判断。観測したい場合は `onAppendedError` を渡す

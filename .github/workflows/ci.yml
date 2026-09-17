@@ -49,7 +49,7 @@ jobs:
         run: pnpm run build
 
       - name: Verify instanceof invariants
-        run: node scripts/verify-instanceof.mjs
+        run: pnpm run check-instanceof
 
       - name: Verify optional peer isolation (import without AWS SDK)
         run: pnpm run check-optional-peer

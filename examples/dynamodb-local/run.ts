@@ -2,7 +2,7 @@
  * DynamoEventStore を Docker 上の DynamoDB Local で動かす E2E demo。
  *
  * 事前準備:
- *   docker compose up -d dynamodb
+ *   docker compose up -d dynamodb-local
  *
  * 実行:
  *   pnpm exec tsx examples/dynamodb-local/run.ts
