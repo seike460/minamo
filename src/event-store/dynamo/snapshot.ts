@@ -126,11 +126,14 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
     const { PutCommand } = libDynamodb();
     // marshall は send の middleware 内で非同期に走るため、caller が参照を
     // 保持する `snapshot` をそのまま渡すと await 窓での mutation が書き込みに
-    // 混入しうる。Proxy 等の非 cloneable な snapshot (assertPlainData は Proxy を
-    // 検出できない) も生の DataCloneError ではなく TypeError に揃える。
+    // 混入しうる。normalizePlainData は clone に加えて own `__proto__`・`undefined`
+    // 値 key を除去する — marshall の removeUndefinedValues と同じ永続化形式に
+    // 揃え、InMemorySnapshotStore と同一内容を保存する。Proxy 等の非 cloneable な
+    // snapshot (assertPlainData は Proxy を検出できない) も生の DataCloneError
+    // ではなく TypeError に揃える。
     let item: Snapshot<TState>;
     try {
-      item = structuredClone(snapshot);
+      item = normalizePlainData(snapshot);
     } catch {
       throw new TypeError("snapshot is not structured-cloneable");
     }

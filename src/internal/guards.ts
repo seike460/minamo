@@ -140,23 +140,29 @@ export function assertDomainEvents(aggregateId: string, events: ReadonlyArray<un
         `event at index ${i} must have a non-empty string type`,
       );
     }
-    // `data` は own property かつ非 undefined・非関数を要求する。DynamoDB 側では
-    // removeUndefinedValues / convertToAttr の挙動により `undefined` や関数値は
-    // 属性ごと消え、読み出し時に fromItem が missing field で失敗する = stream poison。
-    // InMemory 側だけ structuredClone で保持/失敗するため write 側で統一的に弾く (痛み C)。
+    // `data` は optional: v0.2.0 は `data: undefined` (または key 欠落) の event を受理し、
+    // DynamoDB 側は removeUndefinedValues で `data` 属性ごと落として永続化していた。
+    // 読み出しは `data: undefined` として復元されるため、ここでは拒否せず「undefined は
+    // 属性ごと落ちる」 DynamoDB と同じ正規化を永続化側 (normalizePlainData) に任せる。
+    // data が存在する場合のみ plain data を要求する。
     const data = (e as { data?: unknown }).data;
-    if (!Object.hasOwn(e, "data") || data === undefined || typeof data === "function") {
-      throw new EventLimitError(aggregateId, `event at index ${i} is missing data`);
+    if (data !== undefined) {
+      assertPlainData(data, `event at index ${i} data`);
     }
-    assertPlainData(data, `event at index ${i} data`);
   }
 }
 
 /**
- * DynamoDB の item ネスト上限 (32 階層)。`marshall` がこれを超えると error になるため
+ * `data` / `state` の許容ネスト深さ (root object = depth 0 として数える)。
+ *
+ * DynamoDB の item ネスト上限は 32 階層だが、event item / snapshot item は
+ * `data` / `state` 属性で 1 段 wrap され、さらに最深部の leaf scalar も
+ * 1 階層として数えられる。実測 (DynamoDB Local): payload の最深 object は
+ * depth 30 まで受理、depth 31 で ValidationException — つまり
+ * 1 (wrap) + 30 (object) + 1 (leaf scalar) = 32 が上限。
  * write 側検証でも同じ上限を共有する。
  */
-const MAX_PLAIN_DATA_DEPTH = 32;
+const MAX_PLAIN_DATA_DEPTH = 30;
 
 /**
  * `data` / `state` が DEC-011 の "plain data" 契約を満たすかを再帰検証する。
@@ -172,13 +178,23 @@ const MAX_PLAIN_DATA_DEPTH = 32;
  * 同一に round-trip する値」に限定する — 受理しても型が変わって戻る値は
  * reject 側に倒す (bigint→number、Map→object、Date→`{}`、ArrayBuffer→Uint8Array 等)。
  *
+ * object の `undefined` 値は reject ではなく strip 扱いとする: DynamoDB の
+ * `removeUndefinedValues` が属性ごと落とすのと同じ正規化を persist 経路
+ * (`normalizePlainData`) で掛けるため、両 backend は同一内容を保存する。
+ * 一方、array 要素の `undefined` は marshall が要素ごと落として位置がずれる
+ * (`[1, undefined, 3]` → `[1, 3]`) ため reject する — strip すると data が
+ * 静かに壊れる。
+ *
  * 受理: null / boolean / 有限数 / string / Uint8Array / array / plain object
- *       (prototype が Object.prototype または null のもの)
- * 拒否: undefined (marshall が field ごと落とす) / function / symbol / 非有限数 /
- *       bigint (N→number で型を失う) / Map (M→object で型を失う) / Set
+ *       (prototype が Object.prototype または null のもの) /
+ *       object の `undefined` 値 (persist 時に key ごと strip)
+ * 拒否: top-level の undefined / array 要素の undefined / function / symbol /
+ *       非有限数 / bigint (N→number で型を失う) / Map (M→object で型を失う) / Set
  *       (content 型依存で unmarshall が揺れる) / Date・RegExp・class instance 等の
  *       非 plain object / ArrayBuffer・非 Uint8Array view (view 型が失われる) /
- *       own `__proto__` key / enumerable symbol key / 循環参照 / 深さ 32 超過
+ *       own `__proto__` key / enumerable symbol key / 循環参照 /
+ *       深さ 30 超過 (DynamoDB item 上限 32 − `data`/`state` wrap 1 段 −
+ *       leaf scalar 1 段)
  */
 export function assertPlainData(value: unknown, what: string): void {
   assertPlainDataValue(value, what, new Set(), 0);
@@ -203,26 +219,35 @@ export function normalizePlainData<T>(value: T): T {
     // 渡すため、ここに到達する = 契約違反。
     throw new TypeError("value must be structured-cloneable plain data");
   }
-  stripProtoKeys(clone, new Set());
+  stripNonPortableKeys(clone, new Set());
   return clone;
 }
 
-function stripProtoKeys(value: unknown, seen: Set<object>): void {
+/**
+ * own `__proto__` key と `undefined` 値を持つ own key を再帰的に除去する。
+ * `__proto__` は unmarshall の [[Prototype]] 汚染で消失し、`undefined` 値は
+ * marshall の `removeUndefinedValues` で属性ごと落ちる — 両 backend が同じ
+ * 永続化形式を持つよう write / read 両経路で同じ正規化を掛ける。
+ * array 要素の `undefined` は位置ずれ ( `[1, undefined, 3]` → `[1, 3]` ) を
+ * 起こすため strip せず、write 側の `assertPlainData` で reject される前提。
+ */
+function stripNonPortableKeys(value: unknown, seen: Set<object>): void {
   if (value === null || typeof value !== "object" || seen.has(value)) return;
   seen.add(value);
   if (Array.isArray(value)) {
-    for (const v of value) stripProtoKeys(v, seen);
+    for (const v of value) stripNonPortableKeys(v, seen);
     return;
   }
   // Uint8Array 等の非 plain object は内部を触らない
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) return;
   for (const key of Object.keys(value)) {
-    if (key === "__proto__") {
+    const v = (value as Record<string, unknown>)[key];
+    if (key === "__proto__" || v === undefined) {
       delete (value as Record<string, unknown>)[key];
       continue;
     }
-    stripProtoKeys((value as Record<string, unknown>)[key], seen);
+    stripNonPortableKeys(v, seen);
   }
 }
 
@@ -294,12 +319,12 @@ function assertPlainDataValue(
       // own `__proto__` key は unmarshall 時に [[Prototype]] へ吸収されて消失する
       // (marshaller.ts の pollution 防御と同根) ので書き込み側でも拒否する。
       if (key === "__proto__") fail('own "__proto__" key is dropped on DynamoDB unmarshall');
-      assertPlainDataValue(
-        (value as Record<string, unknown>)[key],
-        `${path}.${key}`,
-        seen,
-        depth + 1,
-      );
+      // object の `undefined` 値は persist 経路 (normalizePlainData) で key ごと
+      // strip される = DynamoDB の removeUndefinedValues と同じ永続化形式になるため
+      // 受理する。array 要素の undefined は位置ずれするため array 分岐で弾く。
+      const v = (value as Record<string, unknown>)[key];
+      if (v === undefined) continue;
+      assertPlainDataValue(v, `${path}.${key}`, seen, depth + 1);
     }
   } finally {
     seen.delete(value);
@@ -361,11 +386,24 @@ export function assertSnapshot(snapshot: Snapshot<unknown>): void {
   if (typeof snapshot.timestamp !== "string") {
     throw new TypeError("snapshot missing string timestamp");
   }
-  // state だけでなく snapshot 全体を検証する。consumer 側の extra attribute
+  // state だけでなく snapshot の各 field を検証する。consumer 側の extra attribute
   // (TTL 用の数値等) は認めるが、Date / Map 等の非 plain な extra は
   // InMemory では clone で保持され DynamoDB では marshall が空 object に
   // 退化させる (または throw する) ため backend 間で保存結果が食い違う。
-  // envelope の型検査を先に済ませてあるため、ここで whole-object を検証しても
-  // 診断 message の path は "snapshot.<field>" と具体的に出る。
-  assertPlainData(snapshot, "snapshot");
+  // 各 field は独立した root として検証する: DynamoDB item では各 attribute が
+  // 同じ 1 段 wrap を受けるため、envelope 全体を 1 つの root として数えると
+  // `state` が event の `data` より 1 段厳しくなり実機の許容量と食い違う。
+  for (const key of Object.keys(snapshot)) {
+    // own `__proto__` key は assertPlainData の object 走査が key 側を弾くが、
+    // ここでは値側しか見ないため envelope 直置きの __proto__ を別途弾く。
+    if (key === "__proto__") {
+      throw new TypeError('snapshot must be plain data: own "__proto__" key is not persistable');
+    }
+    const v = (snapshot as Record<string, unknown>)[key];
+    // `undefined` 値の extra attribute は永続化時に normalizePlainData が key ごと
+    // strip する (removeUndefinedValues と同じ形式) ため受理する。`state` の
+    // undefined は上の必須検査で既に弾かれている。
+    if (v === undefined) continue;
+    assertPlainData(v, `snapshot.${key}`);
+  }
 }

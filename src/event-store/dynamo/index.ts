@@ -1,5 +1,5 @@
 import type { DynamoDBDocumentClient, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import type { EventMap, EventsOf, StoredEvent, StoredEventsOf } from "../../core/types.js";
+import type { EventMap, EventsOf, StoredEventsOf } from "../../core/types.js";
 import { ConcurrencyError, EventLimitError } from "../../errors.js";
 import {
   assertAfterVersion,
@@ -7,6 +7,7 @@ import {
   assertAppendOptions,
   assertDomainEvents,
   assertTableName,
+  normalizePlainData,
 } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { AppendOptions, EventStore } from "../types.js";
@@ -109,31 +110,33 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     }
 
     const timestamp = new Date().toISOString();
-    const stored: StoredEvent<string, unknown>[] = events.map((e, i) => {
-      const base = {
-        type: e.type,
-        data: e.data,
-        aggregateId,
-        version: expectedVersion + i + 1,
-        timestamp,
-      } as const;
-      return options?.correlationId !== undefined
-        ? { ...base, correlationId: options.correlationId }
-        : base;
-    });
 
-    // clone は検証・send の前に作る: `stored` は入力 `events[i].data` と参照を共有
-    // するため、size 検証・marshall・返り値をすべて clone (`out`) 側に揃える。
-    // こうしないと「検証した内容」と「実際に marshall した内容」が別オブジェクトになり、
-    // async の marshall 窓で caller が入力を mutate した場合に書き込み内容が検証結果と
-    // 食い違う。また commit 後に structuredClone が投げると「書き込み済みなのに失敗に
-    // 見える」状態になる (二重 append hazard) ので clone も commit 前に行う。
+    // 正規化は検証・send の前に行う: 入力 `events[i].data` は caller と参照を共有する
+    // ため、size 検証・marshall・返り値をすべて正規化済みの clone (`out`) 側に揃える。
+    // `normalizePlainData` は clone + own `__proto__`・`undefined` 値 key の除去を行い、
+    // marshall の `removeUndefinedValues` と同じ正規化を永続化・返り値の双方に適用する
+    // (InMemoryEventStore と byte 同一の persisted form)。こうしないと「検証した内容」と
+    // 「実際に marshall した内容」が別オブジェクトになり、async の marshall 窓で caller が
+    // 入力を mutate した場合に書き込み内容が検証結果と食い違う。`data: undefined` は
+    // key を残したまま `undefined` になり、marshall 側で属性ごと落ちる (v0.2.0 と同じ
+    // 永続化形式)。
     // clone 不可能な data (関数値・Proxy 等、DEC-011 違反) はここで pre-commit に失敗する。
     // assertPlainData は Proxy を検出できない (prototype/keys は target に forward される)
     // ため、clone の失敗を append 入力制約違反として EventLimitError に揃える。
     let out: ReadonlyArray<StoredEventsOf<TMap>>;
     try {
-      out = structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
+      out = events.map((e, i) => {
+        const base = {
+          type: e.type,
+          data: normalizePlainData(e.data),
+          aggregateId,
+          version: expectedVersion + i + 1,
+          timestamp,
+        } as const;
+        return options?.correlationId !== undefined
+          ? { ...base, correlationId: options.correlationId }
+          : base;
+      }) as StoredEventsOf<TMap>[];
     } catch {
       throw new EventLimitError(aggregateId, "event data is not structured-cloneable");
     }

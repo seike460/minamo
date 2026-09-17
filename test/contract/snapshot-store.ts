@@ -156,6 +156,11 @@ export function registerSnapshotStoreContract(ctx: SnapshotContractContext): voi
       };
       // plain data の extra key (TTL 用 epoch 等) は受理される
       await store.save({ ...base, ttl: 1735689600 } as never);
+      // ただし load は両 store で envelope field のみ返す (fromSnapshotItem parity):
+      // extra attribute は保存時に受理されても読み出しでは再構成されない。
+      const loaded = await store.load("ss-08");
+      expect(loaded).toMatchObject({ aggregateId: "ss-08", version: 1 });
+      expect(Object.hasOwn(loaded ?? {}, "ttl")).toBe(false);
       // 非 plain な extra は InMemory では保持され DynamoDB では marshall が
       // 空 object に退化/失敗するため、write 側で統一的に弾く。
       for (const extra of [

@@ -250,7 +250,8 @@ describe("upcasting (AggregateConfig.upcast)", () => {
   });
 
   it("upcast が replay 不可能な shape を返したら TypeError", () => {
-    // upcast 出力も evolve 可能な最小 shape (string type + own data) を要求する。
+    // upcast 出力も evolve 可能な最小 shape (object + string type) を要求する。
+    // `data` 欠落は shape 違反ではない (v0.2.0 互換で `data: undefined` を受理)。
     const stream = [
       {
         type: "Incremented",
@@ -262,7 +263,8 @@ describe("upcasting (AggregateConfig.upcast)", () => {
     ] as unknown as ReadonlyArray<StoredEvent<"Incremented", { amount: number }>>;
     for (const returned of [
       { aggregateId: "c1", version: 1 }, // type 欠落
-      { aggregateId: "c1", version: 1, type: "Incremented" }, // data 欠落
+      { aggregateId: "c1", version: 1, type: 42 }, // 非 string type
+      null, // 非 object
     ]) {
       const config: AggregateConfig<number, CounterEvents> = {
         ...configNoUpcast,
@@ -270,5 +272,34 @@ describe("upcasting (AggregateConfig.upcast)", () => {
       };
       expect(() => rehydrate(config, "c1", stream)).toThrow(TypeError);
     }
+  });
+
+  it("upcast が data 欠落の event を返しても `data: undefined` として evolve に流れる (v0.2.0 互換)", () => {
+    // data 属性を持たない legacy item (v0.2.0 が removeUndefinedValues で永続化した
+    // 形式) は `data: undefined` のまま evolve に渡る。evolve が data を dereference
+    // する場合はそこで TypeError になるため、data を使わない evolve で受理を確認する。
+    const stream = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ] as unknown as ReadonlyArray<StoredEvent<"Incremented", { amount: number }>>;
+    const seen: unknown[] = [];
+    const config: AggregateConfig<number, CounterEvents> = {
+      ...configNoUpcast,
+      upcast: () => ({ aggregateId: "c1", version: 1, type: "Incremented" }) as never,
+      evolve: {
+        Incremented: (state, data) => {
+          seen.push(data);
+          return state;
+        },
+      },
+    };
+    const agg = rehydrate(config, "c1", stream);
+    expect(agg.version).toBe(1);
+    expect(seen).toEqual([undefined]);
   });
 });

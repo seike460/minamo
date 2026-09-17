@@ -23,7 +23,8 @@ export interface ParseStreamRecordOptions {
  *   - 失敗時は `InvalidStreamRecordError(unmarshal_failed, ...)`
  *   - unmarshall は `"__proto__"` キーを持つ Map で [[Prototype]] を汚染するため、
  *     必須 field は `Object.hasOwn` で検査し、`data` は `structuredClone` で正規化する
- * - 必須 field (aggregateId / version / type / timestamp / data) の型違反は `missing_field`
+ * - 必須 field (aggregateId / version / type / timestamp) の型違反は `missing_field`
+ *   (`data` は optional — `data: undefined` で永続化された legacy item が実在する)
  * - `version` は整数かつ >= 1 を要求 (不正な値は `missing_field`)
  * - `eventNames` に含まれない type は strict mode で `unknown_type`、lenient mode で `null`
  * - `correlationId` が string として存在する場合のみ stored に付与 (DEC-011)
@@ -124,9 +125,9 @@ export function parseStreamRecord<
   if (!Object.hasOwn(itemRecord, "timestamp") || typeof itemRecord.timestamp !== "string") {
     throw new InvalidStreamRecordError("missing_field", "timestamp must be a string", "timestamp");
   }
-  if (!Object.hasOwn(itemRecord, "data") || itemRecord.data === undefined) {
-    throw new InvalidStreamRecordError("missing_field", "data attribute is required", "data");
-  }
+  // `data` 属性の欠落は受理する: v0.2.0 は `data: undefined` の event を
+  // removeUndefinedValues で属性ごと落として永続化していたため、data 属性を持たない
+  // legacy item が実在する (fromItem と同じく `data: undefined` として復元する)。
 
   if (!(eventNames as ReadonlyArray<string>).includes(itemRecord.type)) {
     if (options?.ignoreUnknownTypes === true) return null;
@@ -141,7 +142,8 @@ export function parseStreamRecord<
   try {
     // unmarshall 産物はネスト map の __proto__ キーで汚染されうるため clone +
     // own `__proto__` key 除去で正規化する (fromItem と同じ normalizePlainData)。
-    data = normalizePlainData(itemRecord.data);
+    // `data` 属性のない legacy item 由来の undefined はそのまま通す。
+    data = itemRecord.data === undefined ? undefined : normalizePlainData(itemRecord.data);
   } catch {
     // 非 cloneable な data は InvalidStreamRecordError に揃える (生 DataCloneError ではなく)。
     throw new InvalidStreamRecordError(
@@ -180,5 +182,26 @@ export function eventNamesOf<TState, TMap extends EventMap>(
   if (!isObjectRecord(evolve)) {
     throw new TypeError("config.evolve must be an object map of evolve handlers");
   }
-  return Object.keys(evolve) as Array<keyof TMap & string>;
+  // own enumerable key に加えて prototype chain 上の callable method も拾う —
+  // class instance を evolve map にする構成 (v0.2.0 で動いていた) では method が
+  // prototype 上にあり `Object.keys` だけでは `[]` になってしまう。Object.prototype
+  // には到達しない (builtin 名は handler にならない)。
+  const names = [...Object.keys(evolve)];
+  const seenProtos = new Set<object>();
+  let proto: object | null = Object.getPrototypeOf(evolve);
+  // Proxy 経由で循環する prototype chain を返されても無限ループしないよう seen で防御。
+  while (proto !== null && proto !== Object.prototype && !seenProtos.has(proto)) {
+    seenProtos.add(proto);
+    for (const key of Object.getOwnPropertyNames(proto)) {
+      if (
+        key !== "constructor" &&
+        !names.includes(key) &&
+        typeof (evolve as Record<string, unknown>)[key] === "function"
+      ) {
+        names.push(key);
+      }
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+  return names as Array<keyof TMap & string>;
 }

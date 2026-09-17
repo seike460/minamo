@@ -432,10 +432,14 @@ describe("executeCommand", () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 
-  it("CT-EC-33 EventStore.load が malformed な event (非文字列 type / data 欠落) を返す → TypeError", async () => {
+  it("CT-EC-33 EventStore.load が malformed な event (非文字列 type / 非 object 要素) を返す → TypeError", async () => {
+    // `data` 欠落は malformed ではない — v0.2.0 が `data: undefined` の event を
+    // 受理しており、DynamoDB では data 属性ごと落ちて永続化された legacy item が
+    // 実在するため、read 側は `data: undefined` として復元する (CT-17b 参照)。
     for (const bad of [
       { aggregateId: "agg-1", version: 1, type: 42, data: {} },
-      { aggregateId: "agg-1", version: 1, type: "Incremented" },
+      null,
+      "Incremented",
     ]) {
       const store = {
         async load() {
@@ -749,10 +753,11 @@ describe("executeCommand", () => {
     expect(await inner.load("agg-1")).toEqual([]);
   });
 
-  it("CT-EC-37 snapshot 発火時に state が非 plain data → commit 前に TypeError (静かな snapshot 欠落を防ぐ)", async () => {
-    // state に Date (DEC-011 違反) を混入させる evolve。post-commit の snapshot save は
-    // best-effort で失敗を握りつぶすため、commit 前に弾かないと「snapshot が二度と
-    // 書かれない」静かな劣化になる。
+  it("CT-EC-37 snapshot 発火時に state が非 plain data → command は成功し snapshot のみ skip される (DEC-026)", async () => {
+    // snapshot 保存は commit 後の best-effort。state が非 plain data (Date 混入) でも
+    // command は成立させ、snapshot のみ skip する。commit 前に弾く実装だと、閾値到達の
+    // たびに command が throw して stream が 0 件のまま aggregate が恒久的に command
+    // 不能になる (v0.2.0 では command は成功していた)。
     type State = { at: unknown };
     const config = {
       initialState: { at: null },
@@ -760,19 +765,20 @@ describe("executeCommand", () => {
     } as unknown as AggregateConfig<State, { Touched: null }>;
     const inner = new InMemoryEventStore<{ Touched: null }>();
     const snapshots = new InMemorySnapshotStore<State>();
-    await expect(
-      executeCommand({
-        config,
-        store: inner,
-        handler: () => [{ type: "Touched", data: null }],
-        aggregateId: "agg-1",
-        input: undefined,
-        snapshotStore: snapshots,
-        snapshotPolicy: { everyNEvents: 1 },
-      }),
-    ).rejects.toBeInstanceOf(TypeError);
-    // commit 前に弾くため stream も snapshot も空のまま
-    expect(await inner.load("agg-1")).toEqual([]);
+    const result = await executeCommand({
+      config,
+      store: inner,
+      handler: () => [{ type: "Touched", data: null }],
+      aggregateId: "agg-1",
+      input: undefined,
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    });
+    // event は commit され、aggregate は正しく返る
+    expect(result.newEvents).toHaveLength(1);
+    expect(result.aggregate.version).toBe(1);
+    expect(await inner.load("agg-1")).toHaveLength(1);
+    // snapshot のみ skip される (best-effort)
     expect(await snapshots.load("agg-1")).toBeNull();
   });
 
@@ -854,5 +860,111 @@ describe("executeCommand", () => {
     expect(res.aggregate.state).toEqual({ count: 6 });
     // 正規化により own `__proto__` key は保持されない (Dynamo 経路と parity)
     expect(Object.hasOwn(res.aggregate.state, "__proto__")).toBe(false);
+  });
+
+  it("CT-EC-39 class instance の evolve map (method は prototype 上) が動く (v0.2.0 互換)", async () => {
+    // v0.2.0 の `e.type in config.evolve` は prototype chain を辿るため、method を
+    // prototype に持つ class instance を evolve map にできた。own-property 限定への
+    // 強化でこれを壊さないよう、consumer 定義 prototype の callable method は
+    // handler として認める (Object.prototype builtin のみ除外)。
+    class CounterEvolves {
+      Incremented(state: number, data: { amount: number }): number {
+        return state + data.amount;
+      }
+    }
+    const config: AggregateConfig<number, CounterEvents> = {
+      initialState: 0,
+      evolve: new CounterEvolves() as unknown as AggregateConfig<number, CounterEvents>["evolve"],
+    };
+    const store = new InMemoryEventStore<CounterEvents>();
+    const res = await executeCommand({
+      config,
+      store,
+      handler: incrementHandler,
+      aggregateId: "cls-1",
+      input: { amount: 4 },
+    });
+    expect(res.aggregate.state).toBe(4);
+    // rehydrate 経路 (load → replay) でも同じ class instance evolve が効く
+    const res2 = await executeCommand({
+      config,
+      store,
+      handler: incrementHandler,
+      aggregateId: "cls-1",
+      input: { amount: 2 },
+    });
+    expect(res2.aggregate.state).toBe(6);
+    expect(res2.aggregate.version).toBe(2);
+  });
+
+  it("CT-EC-40 名前だけ ConcurrencyError の foreign error は retry せず伝播する", async () => {
+    // dual-install 対策の name 判定は `aggregateId: string` + `expectedVersion: number`
+    // の envelope を要求する。名前だけ一致した custom error は retry 対象にしない
+    // (retry しても expectedVersion 不明の衝突を繰り返すだけで、誤分類の副作用が大きい)。
+    const foreign = Object.assign(new Error("looks concurrent"), {
+      name: "ConcurrencyError",
+    });
+    let appendCalls = 0;
+    const store = {
+      async load() {
+        return [] as never;
+      },
+      async append() {
+        appendCalls += 1;
+        throw foreign;
+      },
+    };
+    const err = await executeCommand({
+      config: counterConfig,
+      store: store as never,
+      handler: incrementHandler,
+      aggregateId: "agg-fx",
+      input: { amount: 1 },
+      maxRetries: 3,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBe(foreign);
+    expect(appendCalls).toBe(1); // retry されていない
+  });
+
+  it("CT-EC-41 別コピーの ConcurrencyError (name + envelope 一致) は retry 対象になる", async () => {
+    // pnpm link / dual-install で投げられた ConcurrencyError は instanceof が false でも
+    // name + `aggregateId`/`expectedVersion` field を持つため retry 対象にする。
+    const foreign = Object.assign(new Error("concurrent write"), {
+      name: "ConcurrencyError",
+      aggregateId: "agg-fx2",
+      expectedVersion: 0,
+    });
+    let appendCalls = 0;
+    const store = {
+      async load() {
+        return [] as never;
+      },
+      async append() {
+        appendCalls += 1;
+        if (appendCalls === 1) throw foreign;
+        return [
+          {
+            type: "Incremented",
+            data: { amount: 1 },
+            aggregateId: "agg-fx2",
+            version: 1,
+            timestamp: "2026-01-01T00:00:00.000Z",
+          },
+        ] as never;
+      },
+    };
+    const res = await executeCommand({
+      config: counterConfig,
+      store: store as never,
+      handler: incrementHandler,
+      aggregateId: "agg-fx2",
+      input: { amount: 1 },
+      maxRetries: 3,
+    });
+    expect(appendCalls).toBe(2); // 1 回目は衝突、2 回目で成功
+    expect(res.newEvents).toHaveLength(1);
   });
 });

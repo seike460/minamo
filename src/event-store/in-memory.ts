@@ -5,6 +5,7 @@ import {
   assertAggregateId,
   assertAppendOptions,
   assertDomainEvents,
+  normalizePlainData,
 } from "../internal/guards.js";
 import type { AppendOptions, EventStore } from "./types.js";
 
@@ -58,35 +59,35 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     }
 
     const timestamp = new Date().toISOString();
-    const stored: AnyStored[] = events.map((e, i) => {
-      const base = {
-        type: e.type,
-        data: e.data,
-        aggregateId,
-        version: expectedVersion + i + 1,
-        timestamp,
-      } as const;
-      return options?.correlationId !== undefined
-        ? { ...base, correlationId: options.correlationId }
-        : base;
-    });
-
     // DynamoDB の marshall round-trip と同じく、保存時に live object と切り離す (痛み C 対策)。
-    // structuredClone を通せない非 plain data (関数・class instance 等) はここで fail-loud に検出
-    // される (DEC-011)。Proxy は assertPlainData をすり抜ける (検査が target に forward される)
-    // ため clone の失敗を append 入力制約違反として EventLimitError に揃える。
+    // `data` は `normalizePlainData` で clone + `__proto__`・`undefined` 値 key の除去を
+    // 掛ける — `removeUndefinedValues` と同じ正規化を永続化内容に適用し、両 backend が
+    // 同一の data を保存する。`data: undefined` は key を残したまま `undefined` になる
+    // (envelope 契約)。非 cloneable な data (関数・class instance・Proxy 等、DEC-011 違反)
+    // はここで fail-loud に検出され、append 入力制約違反として EventLimitError に揃える。
     let persisted: AnyStored[];
     try {
-      persisted = structuredClone(stored) as AnyStored[];
+      persisted = events.map((e, i) => {
+        const base = {
+          type: e.type,
+          data: normalizePlainData(e.data),
+          aggregateId,
+          version: expectedVersion + i + 1,
+          timestamp,
+        } as const;
+        return options?.correlationId !== undefined
+          ? { ...base, correlationId: options.correlationId }
+          : base;
+      });
     } catch {
       throw new EventLimitError(aggregateId, "event data is not structured-cloneable");
     }
     this.#streams.set(aggregateId, [...existing, ...persisted]);
     this.#insertionOrder.push(...persisted);
 
-    // 返り値も clone する: `stored` は入力 `events[i].data` と参照を共有するため、
-    // caller が append 後に input を mutate すると返り値が永続化内容と食い違う。
-    // `persisted` は clone 済みのため再度の structuredClone は失敗しない。
+    // 返り値も clone する: `persisted` は保存側と参照を共有するため、そのまま返すと
+    // caller の mutate が永続化内容に波及する。`persisted` は normalize 済み clone の
+    // ため再度の structuredClone は失敗しない。
     return structuredClone(persisted) as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 

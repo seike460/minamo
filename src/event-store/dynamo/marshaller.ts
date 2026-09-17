@@ -72,13 +72,16 @@ export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unkn
   if (!Object.hasOwn(raw, "timestamp") || typeof raw.timestamp !== "string") {
     throw new TypeError(`DynamoDB item missing string timestamp (got ${typeof raw.timestamp})`);
   }
-  if (!Object.hasOwn(raw, "data") || raw.data === undefined) {
-    throw new TypeError("DynamoDB item missing data attribute");
-  }
+  // `data` 属性の欠落は受理する: v0.2.0 は `data: undefined` の event を
+  // removeUndefinedValues で `data` 属性ごと落として永続化していたため、data 属性を
+  // 持たない legacy item が実在する。write 側も `data: undefined` を受理して
+  // 同じ形式で永続化する (assertDomainEvents は data が存在する場合のみ plain-data
+  // を要求) — read 側では `data: undefined` として復元する。
+  const rawData = Object.hasOwn(raw, "data") ? raw.data : undefined;
 
   let data: unknown;
   try {
-    data = normalizePlainData(raw.data);
+    data = rawData === undefined ? undefined : normalizePlainData(rawData);
   } catch {
     // 非 cloneable な data (synthetic item での関数混入等) は生の DataCloneError
     // ではなく envelope 違反として TypeError に揃える。

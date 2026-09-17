@@ -159,20 +159,21 @@ SDK の transient error に対するリトライが必要なら、`DynamoEventSt
 組み込みの両 store は同じ入力契約を強制する。`InMemoryEventStore` のテストが `DynamoEventStore` の挙動と静かに乖離しないようにするためである:
 
 - `aggregateId` は非空文字列かつ UTF-8 で 2048 byte 以下 (DynamoDB partition key 上限)。`append` / `load` / `loadFrom` / `SnapshotStore` のいずれでも違反は `TypeError`
-- 各 event は非空の string `type` と own property の `data` が必須。違反は `EventLimitError`。不正な event が実 stream に commit されると以後の `rehydrate` が全て失敗するため、`append` は書き込み前に reject する
+- 各 event は非空の string `type` が必須。違反は `EventLimitError`。不正な event が実 stream に commit されると以後の `rehydrate` が全て失敗するため、`append` は書き込み前に reject する。`data` は optional: v0.2.0 は `data: undefined` (または key 欠落) の event を受理し、DynamoDB は `data` 属性ごと落として永続化していたため、両 store とも受理して `data: undefined` として読み出す
 - `correlationId` は指定するなら string。違反は `TypeError` (非文字列は marshall で数値化され、読み出し時に静かに消える)
 
 object 形状の引数 — `config`、`config.evolve`、`options`、`observer`、`snapshotPolicy`、`createCommandRunner` の `deps`/`defaults`、`run()` の引数、`client`/`clientConfig` — はいずれも record (plain object 相当) が必須。`null`・配列・関数・primitive は境界で `TypeError` として reject される (`createCommandRunner` は factory 生成時点)。誤った optional object は `options?.correlationId` が `undefined` に揃うように、fail-loud ではなく静かに無視されてしまうためである。
 
-さらに event の `data` と snapshot の `state` は *plain data* (DEC-011) である必要がある — `structuredClone` と DynamoDB marshall/unmarshall の両方で同一に round-trip する値の集合。`append` と `SnapshotStore.save` はこれを再帰的に検証し、違反は `TypeError` で reject する:
+さらに event の `data` (存在する場合) と snapshot の `state` は *plain data* (DEC-011) である必要がある — `structuredClone` と DynamoDB marshall/unmarshall の両方で同一に round-trip する値の集合。`append` と `SnapshotStore.save` はこれを再帰的に検証する:
 
-- 拒否: `undefined` 値 (ネスト内を含む)、関数、symbol、非有限数 (`NaN`/`Infinity`)、`bigint`、`Map`、`Set`、`Date`、`RegExp`、class instance、`Uint8Array` 以外の `ArrayBuffer`/view (`Buffer` や `Uint8Array` subclass を含む — unmarshall は常に素の `Uint8Array` を返す)、循環参照、own `__proto__` key、enumerable symbol key、32 階層を超えるネスト (DynamoDB の上限)
+- 拒否 (`TypeError`): 関数、symbol、非有限数 (`NaN`/`Infinity`)、`bigint`、`Map`、`Set`、`Date`、`RegExp`、class instance、`Uint8Array` 以外の `ArrayBuffer`/view (`Buffer` や `Uint8Array` subclass を含む — unmarshall は常に素の `Uint8Array` を返す)、循環参照、own `__proto__` key、enumerable symbol key、**配列要素の** `undefined`、30 階層を超えるネスト (DynamoDB の item 上限 32 階層から `data`/`state` 属性の wrap 1 段と最深 leaf scalar の 1 段を引いた値)
 - 受理: `null`、boolean、有限数、string、`Uint8Array`、array、prototype が `Object.prototype` または `null` の object
+- 拒否ではなく正規化: **object プロパティの** `undefined` 値。DynamoDB の `removeUndefinedValues` が属性ごと落とすのと同じく、両 store とも永続化時に key ごと strip する (`{ a: { b: undefined } }` は `{ a: {} }` として保存される)。配列要素は事情が異なる — marshall が `undefined` 要素を静かに落として位置がずれる (`[1, undefined, 3]` → `[1, 3]`) ため、reject のままにして静かな data 破壊を防ぐ。strip 後の形は snapshot 保存・store 経由で `evolve` に届く `data` と一致するため、InMemory と DynamoDB は同一の payload 内容を永続化・replay する
 
 型レベルの制約も 2 点ある:
 
 - `EventMap` は `Record<string, unknown>`。event map は `type` alias で宣言すること。index signature を持たない `interface` は制約を**満たさない**
-- event の `data` に `undefined` を実行時に渡してはいけない。`structuredClone` は `undefined` field を保持するが DynamoDB の `marshall` は落とすため、InMemory と DynamoDB で永続化内容が食い違う。payload field は optional で宣言する (`{ activatedAt?: string }`)。なお EventMap のキーを optional (`{ A?: { ... } }`) にしても `evolve` の `A` エントリは必須のままである — 省略は compile error になる (永続化済みの `A` event に handler が無いと stream が rehydrate 不能になるため)
+- `data` を持たない (または `data: undefined` の) event は `data` 属性なしで永続化される — v0.2.0 が `removeUndefinedValues` で生成していたのと同じ形式。読み出しは `data: undefined` として復元され、`evolve` はそのような event に対して `data === undefined` を受け取る。`evolve` が `data` を object として dereference できるよう、payload 型は空でも `{}` で宣言するのが無難である。なお EventMap のキーを optional (`{ A?: { ... } }`) にしても `evolve` の `A` エントリは必須のままである — 省略は compile error になる (永続化済みの `A` event に handler が無いと stream が rehydrate 不能になるため)
 
 同じ理由で `executeCommand` は `EventStore` / `SnapshotStore` の契約を実行時に検証する (load は配列を返す、append は commit した event と同数・連番を返す、snapshot は `aggregateId` / `version` / `state` / `timestamp` を持つ)。契約違反の custom store は stream を腐らせる代わりに `TypeError` で fail-loud する。
 

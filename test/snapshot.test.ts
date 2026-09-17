@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type {
+  AggregateConfig,
   AppendOptions,
+  CommandHandler,
   EventStore,
   EventsOf,
   ExecuteObserver,
@@ -137,6 +139,85 @@ describe("executeCommand + Snapshot", () => {
     const snap = await snapshots.load("snap-1");
     expect(snap?.version).toBe(2); // 2 を跨いだ時点で save、3 は跨がない
     expect(snap?.state).toBe(2);
+  });
+
+  it("state の own property が undefined を含んでも command が失敗しない (snapshot 閾値到達で stuck しない)", async () => {
+    // 回帰: `{ closedAt: undefined }` のような state (exactOptionalPropertyTypes 無しの
+    // consumer では型上合法) は v0.2.0 で受理されていた。snapshot 発火のたびに
+    // commit 前検証で弾くと、stream 0 件のまま aggregate が恒久的に command 不能に
+    // なる。snapshot state の persist 側で undefined 値 key を strip する
+    // (removeUndefinedValues parity) ので、command は繰り返し成功しなければならない。
+    type JobState = { count: number; closedAt?: string | undefined };
+    const jobConfig: AggregateConfig<JobState, CounterEvents> = {
+      // initialState に `closedAt: undefined` の own key を持たせる (元の再現条件)。
+      // rehydrate の normalizePlainData で strip され、state は {count: 0} になる。
+      initialState: { count: 0, closedAt: undefined },
+      evolve: {
+        Incremented: (state, data) => ({ ...state, count: state.count + data.amount }),
+      },
+    };
+    const openHandler: CommandHandler<JobState, CounterEvents, { amount: number }> = (
+      _agg,
+      input,
+    ) => [{ type: "Incremented", data: { amount: input.amount } }];
+
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<JobState>();
+    const params = {
+      config: jobConfig,
+      store,
+      handler: openHandler,
+      aggregateId: "job-1",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    };
+
+    // 2 回連続で成功する (1 回目で snapshot 閾値到達 → save 後、2 回目は snapshot 経路で replay)
+    const r1 = await executeCommand(params);
+    const r2 = await executeCommand(params);
+    expect(r1.aggregate.state).toEqual({ count: 1 });
+    expect(r2.aggregate.state).toEqual({ count: 2 });
+    expect(await store.load("job-1")).toHaveLength(2);
+    // snapshot も保存される (state 内の undefined 値 key は strip 済み)
+    const snap = await snapshots.load("job-1");
+    expect(snap?.version).toBe(2);
+    expect(snap?.state).toEqual({ count: 2 });
+  });
+
+  it("evolve が undefined 値を持つ own key を返しても command は成功し、永続化・snapshot で strip される", async () => {
+    // evolve の戻り値 `{ count, closedAt: undefined }` は persist 正規化で
+    // `closedAt` ごと落ちる。caller に返る aggregate.state は evolve の戻り値
+    // そのまま (v0.2.0 と同じく own key が値 undefined で残る)。
+    type JobState = { count: number; closedAt?: string | undefined };
+    const jobConfig: AggregateConfig<JobState, CounterEvents> = {
+      initialState: { count: 0, closedAt: undefined },
+      evolve: {
+        Incremented: (state, data) => ({
+          count: state.count + data.amount,
+          closedAt: undefined,
+        }),
+      },
+    };
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<JobState>();
+    const result = await executeCommand({
+      config: jobConfig,
+      store,
+      handler: (_agg, input: { amount: number }) => [
+        { type: "Incremented", data: { amount: input.amount } },
+      ],
+      aggregateId: "job-2",
+      input: { amount: 3 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    });
+    // caller に返る state は evolve の戻り値そのまま (v0.2.0 と同じく own key
+    // `closedAt` が値 undefined で残る)。strip が掛かるのは永続化面のみ。
+    expect(result.aggregate.state).toEqual({ count: 3 });
+    expect(Object.hasOwn(result.aggregate.state, "closedAt")).toBe(true);
+    // snapshot は strip 済みの形で保存される (reload で見える形と一致)
+    expect(await snapshots.load("job-2")).toMatchObject({ state: { count: 3 } });
   });
 
   it("snapshot 経路で replay 件数 (onLoaded.eventCount) が減る", async () => {

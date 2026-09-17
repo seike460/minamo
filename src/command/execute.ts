@@ -22,16 +22,20 @@ import type { CommandHandler } from "./types.js";
  *
  * `Object.hasOwn` は key の存在だけを見るため `{ X: undefined }` のような登録を
  * 通してしまい、application 側の `=== undefined → continue` が event を「永続化済み
- * だが state には反映されない」静かな乖離にする。prototype chain 由来の名前
- * (`toString` 等) と値の非関数性の双方をここで弾く。
+ * だが state には反映されない」静かな乖離にする。値の callable 性を必須としつつ、
+ * 非 own property については Object.prototype の builtin 名 (`toString` 等) のみを
+ * 弾く — class instance を evolve map にする構成 (methods は prototype 上にあり
+ * own property ではない) は v0.2.0 で動いていたため、custom prototype method は
+ * 正当な handler として認める。
  */
 function hasEvolveHandler<TState, TMap extends EventMap>(
   config: AggregateConfig<TState, TMap>,
   type: string,
 ): boolean {
+  const handler = (config.evolve as Record<string, unknown>)[type];
   return (
-    Object.hasOwn(config.evolve, type) &&
-    typeof (config.evolve as Record<string, unknown>)[type] === "function"
+    typeof handler === "function" &&
+    (Object.hasOwn(config.evolve, type) || !Object.hasOwn(Object.prototype, type))
   );
 }
 
@@ -144,8 +148,10 @@ function replayEvents<TState, TMap extends EventMap>(
 
     // upcast はメタデータ (aggregateId/version/timestamp) を保持する契約。保持は consumer 責務であり、
     // ここでは変換結果が evolve 可能な最小 shape を持つことのみを検証する。
-    // `data` の存在も要求する: custom store 由来のイベントに data が無いと evolve に
-    // undefined が流れ、永続化形式 (write 側は data 必須) との静かな乖離になる。
+    // `data` の存在は要求しない: v0.2.0 は `data: undefined` の event を受理しており
+    // (DynamoDB では removeUndefinedValues で `data` 属性ごと落ちて永続化された)、
+    // その legacy item を含む stream を read 側でも読めるようにするため `data` は
+    // optional として evolve に流す (write 側は assertDomainEvents で同じ契約)。
     const e = upcast === undefined ? raw : (upcast(raw) as StoredEventsOf<TMap>);
     if (!isObjectRecord(e) || typeof e.type !== "string") {
       throw new TypeError(
@@ -154,13 +160,11 @@ function replayEvents<TState, TMap extends EventMap>(
           : `upcast returned an invalid event at index ${i}`,
       );
     }
-    if (!Object.hasOwn(e, "data") || e.data === undefined) {
-      throw new TypeError(`event at index ${i} has no data`);
-    }
 
-    // `in` 演算子は prototype chain を辿るため "toString" 等の Object.prototype メンバー名が
-    // missing_evolve_handler を素通りし、prototype method が evolve として呼ばれて state を
-    // 静かに破壊する。own property かつ callable に限定する (`{X: undefined}` 登録も弾く)。
+    // `in` 演算子は prototype chain を無差別に辿るため "toString" 等の Object.prototype
+    // メンバー名が missing_evolve_handler を素通りし、prototype method が evolve として
+    // 呼ばれて state を静かに破壊する。callable であることを要求しつつ、非 own property は
+    // Object.prototype builtin 名のみを弾く (`{X: undefined}` 登録も弾く)。
     if (!hasEvolveHandler(config, e.type)) {
       throw new InvalidEventStreamError(
         id,
@@ -181,7 +185,7 @@ function replayEvents<TState, TMap extends EventMap>(
     if (handler === undefined) continue;
     const next = handler(
       state as ReadonlyDeep<TState>,
-      e.data as ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>,
+      e.data as ReadonlyDeep<TMap[keyof TMap & string]>,
     );
     state = assertEvolveResult(next, e.type);
   }
@@ -216,7 +220,9 @@ export function rehydrate<TState, TMap extends EventMap>(
   }
   let initialState: TState;
   try {
-    initialState = structuredClone(config.initialState) as TState;
+    // persist 経路と同じ normalize (undefined 値 key の除去) を掛け、state が
+    // 「reload 後に見える形」と最初から一致するようにする。
+    initialState = normalizePlainData(config.initialState) as TState;
   } catch {
     // 非 cloneable な initialState (関数・Symbol 等、DEC-011 違反) を生の
     // DataCloneError ではなく契約違反の TypeError に揃える。
@@ -468,16 +474,16 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       if (!isObjectRecord(d) || typeof d.type !== "string" || d.type.length === 0) {
         throw new TypeError(`handler returned an invalid event at index ${i}`);
       }
-      // `data: undefined` も弾く: removeUndefinedValues で Dynamo 側は属性ごと消え、
-      // InMemory 側は保持される = backend 間で永続化内容が食い違う (痛み C)。
-      if (!Object.hasOwn(d, "data") || d.data === undefined) {
-        throw new TypeError(`handler returned event at index ${i} without data`);
-      }
+      // `data` は optional (v0.2.0 互換): `data: undefined` の event は DynamoDB で
+      // removeUndefinedValues により属性ごと落ちて永続化され、読み出しでは
+      // `data: undefined` として復元される。存在する場合のみ plain data を要求する。
       // assertPlainData は store.append 側 (assertDomainEvents) でも走るが、custom
       // EventStore がその検証を実装しない場合に非 plain data がすり抜けるのと、
-      // evolve 用の structuredClone が生 DataCloneError を投げるのを防ぐため
+      // evolve 用の clone が生 DataCloneError を投げるのを防ぐため
       // ここでも TypeError に揃えて弾く。
-      assertPlainData(d.data, `handler returned event at index ${i} data`);
+      if (d.data !== undefined) {
+        assertPlainData(d.data, `handler returned event at index ${i} data`);
+      }
       if (!hasEvolveHandler(config, d.type)) {
         throw new InvalidEventStreamError(
           aggregateId,
@@ -494,7 +500,9 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     // decided は直前に shape + evolve 登録を検証済みのため、ここでは純粋に state を畳む。
     let updatedState: TState;
     try {
-      updatedState = structuredClone(aggregate.state) as TState;
+      // caller へ返す state は永続化と同じ正規化形に揃える (undefined 値 key の除去
+      // 等)。`reload したら見える形」と一致させることで「その場だけ見える値」を防ぐ。
+      updatedState = normalizePlainData(aggregate.state) as TState;
     } catch {
       // replayed state が非 cloneable (consumer evolve の DEC-011 違反) の場合、
       // 生の DataCloneError ではなく契約違反の TypeError に揃える。
@@ -502,12 +510,12 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     }
     for (const [i, d] of decided.entries()) {
       const evolveHandler = config.evolve[d.type as keyof TMap & string];
-      // evolve には data の clone を渡す: 不純な evolve が payload を mutate しても
-      // 永続化される `decided` に波及しない (DEC-011 は consumer 契約だが、pre-append
-      // 化により mutate の被害範囲が「返り値」から「永続化データ」に拡大したため防御)。
-      let eventData: ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>;
+      // evolve には data の正規化済み clone を渡す: 不純な evolve が payload を
+      // mutate しても永続化される `decided` に波及しないのに加え、evolve が見る
+      // data は永続化・reload 後の形 (undefined 値 key 除去済み) と一致する。
+      let eventData: ReadonlyDeep<TMap[keyof TMap & string]>;
       try {
-        eventData = structuredClone(d.data) as typeof eventData;
+        eventData = normalizePlainData(d.data) as typeof eventData;
       } catch {
         // Proxy 等の非 cloneable な data (DEC-011 違反) を生の DataCloneError
         // ではなく契約違反の TypeError に揃える。
@@ -518,17 +526,13 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     }
 
     // append 成功後の version (postcondition で newEvents.length === decided.length が
-    // 検証されるため、この時点で確定的に計算できる)。この commit で snapshot 発火が
-    // 予定されるなら、保存対象の state が DEC-011 を満たすかを commit 前に検証する。
-    // post-commit の save は best-effort で失敗を握りつぶすため、ここで弾かないと
-    // 「snapshot が二度と書かれない」静かな劣化になる。
+    // 検証されるため、この時点で確定的に計算できる)。
+    // NOTE: snapshot 対象 state の検証をここ (commit 前) に置かない。snapshot は
+    // rehydration の最適化層 (DEC-026) であり、state が非 plain data でも command 自体は
+    // 成立する — commit 前に弾くと v0.2.0 で動いていた aggregate が閾値到達のたびに
+    // throw して恒久的に command 不能になる。保存可否は save 側 (assertSnapshot →
+    // best-effort swallow) に委ねる。
     const committedVersion = aggregate.version + decided.length;
-    if (
-      snapshotStore !== undefined &&
-      shouldSnapshot(snapshotPolicy, aggregate.version, committedVersion)
-    ) {
-      assertPlainData(updatedState, "aggregate state (snapshot candidate)");
-    }
 
     // retry の発火条件は append の ConcurrencyError のみ (concept.md §5.6)。commit 後処理
     // (onCommitted / snapshot save) をこの catch の射程に入れると、それらが
@@ -542,7 +546,14 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       // retry 対象にする (TransactionCanceledException の name 判定と同じ方針)。
       const isConcurrency =
         err instanceof ConcurrencyError ||
-        (err instanceof Error && err.name === "ConcurrencyError");
+        (err instanceof Error &&
+          err.name === "ConcurrencyError" &&
+          // name 一致だけだと custom store が投げる「名前だけ ConcurrencyError」の
+          // foreign error も retry 対象になり、cause.expectedVersion が undefined で
+          // `cause: ConcurrencyError` の型と食い違う。envelope field を要求して
+          // dual-install の真の ConcurrencyError のみを拾う。
+          typeof (err as { aggregateId?: unknown }).aggregateId === "string" &&
+          typeof (err as { expectedVersion?: unknown }).expectedVersion === "number");
       if (isConcurrency) {
         lastConcurrency = err as ConcurrencyError;
         observer?.onConcurrencyConflict?.({
@@ -600,7 +611,9 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
             version,
             // caller へ返す aggregate.state と共有しない (custom SnapshotStore が参照を
             // 保持する場合に、caller 側の mutation が保存済み snapshot に波及しないように)。
-            state: structuredClone(updatedState) as TState,
+            // 永続化と同じ normalize (undefined 値 key 除去) を掛け、両 backend で
+            // 同一内容が保存されるようにする。
+            state: normalizePlainData(updatedState) as TState,
             timestamp: new Date().toISOString(),
           };
           await snapshotStore.save(snapshot);

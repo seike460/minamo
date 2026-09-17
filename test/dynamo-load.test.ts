@@ -51,10 +51,15 @@ describe("DynamoEventStore.load item envelope validation (fromItem)", () => {
     expect(loaded).toEqual([wellFormed]);
   });
 
-  it("throws TypeError when data attribute is absent", async () => {
+  it("returns data: undefined for a legacy item without a data attribute", async () => {
+    // v0.2.0 は `data: undefined` の event を removeUndefinedValues で data 属性ごと
+    // 落として永続化していたため、data 属性を持たない item が実在する。read 側は
+    // `data: undefined` として復元する (既存 stream の読み取り不能化を防ぐ)。
     const { data: _omit, ...rest } = wellFormed;
     const store = storeReturningItems([rest]);
-    await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+    const loaded = await store.load("a-1");
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]?.data).toBeUndefined();
   });
 
   for (const badVersion of [0, 1.5, Number.NaN, -3] as const) {
@@ -97,7 +102,9 @@ describe("DynamoEventStore.load item envelope validation (fromItem)", () => {
   });
 
   it("loadFrom applies the same envelope validation", async () => {
-    const { data: _omit, ...rest } = wellFormed;
+    // `type` 欠落 (必須 field) は loadFrom でも TypeError。`data` 欠落は legacy
+    // 形式として受理されるためここでは必須 field の型違反を検証する。
+    const { type: _omit, ...rest } = wellFormed;
     const store = storeReturningItems([rest]);
     await expect(store.loadFrom("a-1", 0)).rejects.toBeInstanceOf(TypeError);
   });

@@ -279,8 +279,6 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       const store = await makeStore();
       const malformed = [
         { data: { amount: 1 } }, // type 欠落
-        { type: "Incremented" }, // data 欠落
-        { type: "Incremented", data: undefined }, // data undefined (marshall で属性ごと消失する)
         { type: "", data: { amount: 1 } }, // 空 type
         { type: 42, data: { amount: 1 } }, // 非 string type
         null, // 非 object 要素
@@ -293,6 +291,25 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       }
       // reject された append は何も永続化していないこと
       expect(await store.load("agg-17-0")).toEqual([]);
+    });
+
+    it("CT-17b `data` 欠落・`data: undefined` の event は受理され、read 側は data === undefined に正規化される (v0.2.0 互換)", async () => {
+      // v0.2.0 は `data: undefined` / data key 欠落の event を受理し、DynamoDB 側は
+      // removeUndefinedValues で `data` 属性ごと落として永続化していた。この形式の
+      // item は実在するため、両 store で受理して `data: undefined` として読み出す
+      // (write strict / read lenient ではなく write 側も v0.2.0 互換を維持する)。
+      const store = await makeStore();
+      await store.append(
+        "agg-17b",
+        [{ type: "Incremented" } as never, { type: "Incremented", data: undefined } as never],
+        0,
+      );
+      const loaded = await store.load("agg-17b");
+      expect(loaded).toHaveLength(2);
+      expect(loaded[0]?.data).toBeUndefined();
+      expect(loaded[1]?.data).toBeUndefined();
+      // `data` own property の存在は両 backend で揃える (envelope 契約)
+      expect(Object.hasOwn(loaded[0] ?? {}, "data")).toBe(true);
     });
 
     it("CT-18 invalid aggregateId → TypeError (append / load / loadFrom 共通)", async () => {
@@ -363,7 +380,9 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
         ["循環参照", circular],
         ["Date (marshall で {} に退化)", new Date(0)],
         ["own __proto__ key (unmarshall で消失)", protoKeyed],
-        ["nested undefined (marshall が field ごと落とす)", { a: { b: undefined } }],
+        // array 要素の undefined は marshall が要素ごと落として位置がずれる
+        // ([1, undefined, 3] → [1, 3]) ため reject する — strip は data を壊す。
+        ["array element undefined (位置ずれ)", { a: [1, undefined, 3] }],
         ["非有限数 NaN", Number.NaN],
         [
           "class instance (prototype が失われる)",
@@ -436,6 +455,37 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       expect(data.bin).toBeInstanceOf(Uint8Array);
       expect(data.nested).toEqual({ a: [{ b: null, c: [1, "two", true] }] });
       expect(data.nullProto).toEqual({ v: 1 });
+    });
+
+    it("CT-22b object の undefined 値は受理され、persist 時に key ごと strip される (removeUndefinedValues と同じ)", async () => {
+      // `{ a: { b: undefined } }` のような nested undefined は v0.2.0 でも両 backend で
+      // 受理されていた (InMemory は保持、DynamoDB は marshall が落とす = 読み出しが
+      // 食い違っていた)。write 側で reject せず、永続化側で「undefined 値の own key を
+      // 落とす」正規化を掛けて両 backend の保存内容を一致させる。
+      const store = await makeStore();
+      await store.append(
+        "agg-22b",
+        [{ type: "Incremented", data: { a: { b: undefined }, c: 1 } as never }],
+        0,
+      );
+      const loaded = await store.load("agg-22b");
+      // `b` は strip され、両 backend で同じ `{ a: {}, c: 1 }` が読める
+      expect(loaded[0]?.data).toEqual({ a: {}, c: 1 });
+    });
+
+    it("CT-21c plain-data の深さ境界を固定する (makeNested(30) 受理 / 31 で reject)", async () => {
+      // DynamoDB の item ネスト上限は 32 階層。event item は `data` 属性で 1 段
+      // wrap され、最深部の leaf scalar も 1 階層に数えられるため、payload の最深
+      // object は depth 30 まで受理、depth 31 で ValidationException (実測で固定)。
+      // minamo の深さカウントは root object を depth 0 として数えるため、
+      // makeNested(30) が受理される境界、makeNested(31) が reject 側。
+      const store = await makeStore();
+      await expect(
+        store.append("agg-21c-ok", [{ type: "Incremented", data: makeNested(30) as never }], 0),
+      ).resolves.toHaveLength(1);
+      await expect(
+        store.append("agg-21c-ng", [{ type: "Incremented", data: makeNested(31) as never }], 0),
+      ).rejects.toBeInstanceOf(TypeError);
     });
 
     it("CT-23 events が非配列・null → EventLimitError (raw TypeError に落とさない)", async () => {
