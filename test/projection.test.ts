@@ -237,6 +237,17 @@ describe("parseStreamRecord", () => {
     }
   });
 
+  it("CT-PB-20 throws TypeError when options is not an object", () => {
+    // 非 object の options は `options?.ignoreUnknownTypes` が undefined に揃って
+    // strict mode として静かに無視されるため入口で弾く。配列も同じく
+    // `ignoreUnknownTypes` を持たず silent skip になるため拒否する。
+    for (const bad of [null, 42, "opts", [], () => {}]) {
+      expect(() =>
+        parseStreamRecord<CounterEvents>(insertRecord(), acceptedNames, bad as never),
+      ).toThrow(TypeError);
+    }
+  });
+
   it("CT-PB-19 throws missing_field when aggregateId is an empty string", () => {
     // 空文字は DynamoDB partition key として成立しないため欠落扱いにする。
     const bad = insertRecord({
@@ -314,5 +325,22 @@ describe("eventNamesOf", () => {
   it("returns a ReadonlyArray narrowed to keyof TMap & string at the type level", () => {
     const names = eventNamesOf(counterConfig);
     expectTypeOf(names).toEqualTypeOf<ReadonlyArray<"Incremented">>();
+  });
+
+  it("CT-EN-03 throws TypeError when config.evolve is not an object", () => {
+    // `Object.keys("ab")` は ["0","1"] の garbage を返し、結果の eventNames が
+    // 全件 unknown_type 判定になる静かな破綻を生む。入口で弾く。
+    for (const bad of [
+      null,
+      "config",
+      {}, // evolve 欠落
+      { evolve: null },
+      { evolve: "ab" }, // Object.keys → ["0","1"] の garbage
+      { evolve: 42 },
+      { evolve: [] }, // Object.keys([]) → [] で全件 unknown_type になる
+      { evolve: () => {} }, // function は own enumerable key を持たず [] になる
+    ]) {
+      expect(() => eventNamesOf(bad as never)).toThrow(TypeError);
+    }
   });
 });

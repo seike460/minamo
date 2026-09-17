@@ -176,10 +176,12 @@ describe("rehydrate", () => {
     for (const bad of [
       null,
       "not-an-object",
+      [], // 配列は object だが initialState/evolve を持てない
       { evolve: {} }, // initialState 欠落
       { initialState: undefined, evolve: {} }, // explicit undefined も不可
       { initialState: 0 }, // evolve 欠落
       { initialState: 0, evolve: null }, // evolve が非 object
+      { initialState: 0, evolve: [] }, // 配列 evolve は hasOwn が常に false で退化する
       { initialState: 0, evolve: {}, upcast: "not-a-function" }, // upcast が非関数
     ]) {
       expect(() => rehydrate(bad as never, "agg-1", [])).toThrow(TypeError);
@@ -200,6 +202,14 @@ describe("rehydrate", () => {
     const events = [stored("agg-1", 1, "Incremented", { amount: 1 })];
     for (const bad of [undefinedEvolve, asyncEvolve]) {
       expect(() => rehydrate(bad, "agg-1", events)).toThrow(TypeError);
+    }
+  });
+
+  it("CT-RH-16 非 object の event 要素 (null / primitive / 配列) → TypeError", () => {
+    // 配列・primitive の要素は `raw.aggregateId` の生アクセスや誤った error class
+    // (InvalidEventStreamError) に落ちる前に shape 違反として弾く。
+    for (const bad of [null, 42, "event", []]) {
+      expect(() => rehydrate(counterConfig, "agg-1", [bad] as never)).toThrow(TypeError);
     }
   });
 });

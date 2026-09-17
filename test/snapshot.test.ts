@@ -303,6 +303,9 @@ describe("executeCommand + Snapshot", () => {
       } as unknown as Snapshot<number>,
       // null 以外の非 object (undefined) を返す契約違反
       undefined as unknown as Snapshot<number>,
+      // 配列・primitive も Snapshot shape ではない (field アクセスの誤診断を防ぐ)
+      [] as unknown as Snapshot<number>,
+      42 as unknown as Snapshot<number>,
     ];
 
     for (const snap of cases) {

@@ -14,6 +14,16 @@ const MAX_AGGREGATE_ID_BYTES = 2048;
 const textEncoder = new TextEncoder();
 
 /**
+ * 「plain object 相当の record」判定。`typeof x === "object"` だけでは配列が
+ * すり抜け、`options?.correlationId` のような property access が undefined に
+ * 揃って silent skip になるため、境界検証では配列も拒否する。
+ * (class instance は通す — prototype までは要求しない minimal shape 契約)
+ */
+export function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
  * `aggregateId` の契約検証。DynamoDB は空文字・非文字列の partition key を service
  * error で拒否するが InMemoryEventStore は受理してしまうため、両 store の入口で
  * 同じ検証を行い backend 間の振る舞い差異 (痛み C) を無くす。
@@ -43,14 +53,14 @@ export function assertAggregateId(aggregateId: unknown): asserts aggregateId is 
  * 組み合わせでのみ弾く。
  */
 export function assertAggregateConfig(config: unknown): void {
-  if (config === null || typeof config !== "object") {
+  if (!isObjectRecord(config)) {
     throw new TypeError("config must be an AggregateConfig object");
   }
   const c = config as { initialState?: unknown; evolve?: unknown; upcast?: unknown };
   if (!Object.hasOwn(config, "initialState") || c.initialState === undefined) {
     throw new TypeError("config.initialState is required (undefined is not plain data)");
   }
-  if (c.evolve === null || typeof c.evolve !== "object") {
+  if (!isObjectRecord(c.evolve)) {
     throw new TypeError("config.evolve must be an object map of evolve handlers");
   }
   if (c.upcast !== undefined && typeof c.upcast !== "function") {
@@ -66,7 +76,7 @@ export function assertAggregateConfig(config: unknown): void {
  * fallback する既存契約のためここでは検査しない (typeof 判定が呼び出し側で走る)。
  */
 export function assertEventStoreShape(store: unknown): void {
-  if (store === null || typeof store !== "object") {
+  if (!isObjectRecord(store)) {
     throw new TypeError("store must be an EventStore object");
   }
   const s = store as { load?: unknown; append?: unknown };
@@ -82,7 +92,7 @@ export function assertEventStoreShape(store: unknown): void {
  * `SnapshotStore` 実装の最小 shape 検証。`load` / `save` の非関数・欠落を入口で弾く。
  */
 export function assertSnapshotStoreShape(store: unknown): void {
-  if (store === null || typeof store !== "object") {
+  if (!isObjectRecord(store)) {
     throw new TypeError("snapshotStore must be a SnapshotStore object");
   }
   const s = store as { load?: unknown; save?: unknown };
@@ -121,7 +131,7 @@ export function assertDomainEvents(aggregateId: string, events: ReadonlyArray<un
   }
   for (let i = 0; i < events.length; i++) {
     const e = events[i] as { type?: unknown } | null | undefined;
-    if (e === null || e === undefined || typeof e !== "object") {
+    if (!isObjectRecord(e)) {
       throw new EventLimitError(aggregateId, `event at index ${i} is not an object`);
     }
     if (typeof e.type !== "string" || e.type.length === 0) {
@@ -184,7 +194,15 @@ export function assertPlainData(value: unknown, what: string): void {
  * DynamoDB 経路では (setter 吸収→clone で) 消えるため、read 側でも揃えて除去する。
  */
 export function normalizePlainData<T>(value: T): T {
-  const clone = structuredClone(value);
+  let clone: T;
+  try {
+    clone = structuredClone(value);
+  } catch {
+    // Proxy 等の非 cloneable 値が流入した場合に生の DataCloneError (DOMException)
+    // ではなく契約違反の TypeError に揃える。呼び出し側は「plain data 前提の値」を
+    // 渡すため、ここに到達する = 契約違反。
+    throw new TypeError("value must be structured-cloneable plain data");
+  }
   stripProtoKeys(clone, new Set());
   return clone;
 }
@@ -291,8 +309,17 @@ function assertPlainDataValue(
 /**
  * `AppendOptions.correlationId` の契約検証。非文字列を渡すと DynamoDB 側では `N` として
  * marshall され read path で黙って落ちる (write と read で値が食い違う) ため write 側で弾く。
+ * `options` 自体が非 object の場合 `options?.correlationId` は undefined に揃って静かに
+ * 無視されるため、ここでも入口で弾く。
  */
 export function assertAppendOptions(aggregateId: string, options: AppendOptions | undefined): void {
+  if (options !== undefined && !isObjectRecord(options)) {
+    throw new TypeError(
+      `options for aggregate ${clip(aggregateId)} must be an object (got ${
+        options === null ? "null" : typeof options
+      })`,
+    );
+  }
   const correlationId = options?.correlationId;
   if (correlationId !== undefined && typeof correlationId !== "string") {
     throw new TypeError(
@@ -319,7 +346,7 @@ export function assertAfterVersion(afterVersion: unknown): asserts afterVersion 
  * load 側で弾ける shape をわざわざ書き込ませない (書いた snapshot は二度と読めない)。
  */
 export function assertSnapshot(snapshot: Snapshot<unknown>): void {
-  if (snapshot === null || typeof snapshot !== "object") {
+  if (!isObjectRecord(snapshot)) {
     throw new TypeError("snapshot must be an object");
   }
   assertAggregateId(snapshot.aggregateId);

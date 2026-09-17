@@ -18,5 +18,12 @@ fix: 入力境界の fail-loud 化と clone 経路のエラー正規化で backe
 - custom `SnapshotStore.load` の `state` を `normalizePlainData` で正規化し、own `__proto__` key を除去（`DynamoSnapshotStore.load` との parity）
 - `EventStore.append` 返り値の postcondition に `type` の string 検査を追加
 - `fromItem` / `fromSnapshotItem` が非 object の item（mock/非標準 backend 由来の null・primitive）を `TypeError` で弾く
+- `createCommandRunner` が `deps`・`config`・`store`・`defaults`（`observer`/`snapshotStore`/`snapshotPolicy`）の shape と `defaults.maxRetries`/`defaults.snapshotPolicy.everyNEvents` の値域を factory 生成時点で検証し、初回 `run()` まで設定ミスを持ち越さない。`run()` の非 object `args` も `TypeError` で弾く
+- `EventStore.append` の `options` と `parseStreamRecord` の `options` が非 object の場合に `TypeError` で弾く（`options?.x` の silent skip を防止）
+- `eventNamesOf` が `config.evolve` の非 object を `TypeError` で弾く（`Object.keys("ab")` が index 配列を返す静かな破綻を防止）
+- `normalizePlainData` が非 cloneable 値（`Proxy` 等）を `TypeError` に正規化し、全呼び出し経路で生 `DataCloneError` が漏れない契約に統一
+- `validate` が schema 結果の `issues` を own property で判定（prototype chain 由来の `issues` で成功結果が failure に誤分類されるのを防止）
+- 境界の object 検査を `isObjectRecord`（null・配列・primitive を拒否する record 判定）に統一。`config`/`evolve`/`options`/`observer`/`snapshotPolicy`/`defaults`/DynamoDB item 等に配列や関数を渡した際の silent skip（`options?.x` が undefined に揃う・`Object.keys([])` が `[]` を返す等）を `TypeError` で一貫して reject
+- `config.client`（持参 `DynamoDBDocumentClient`）に `send` method を要求し、非 object の `config.clientConfig` を `TypeError` で弾く（初回 `.send()` まで設定ミスを持ち越さない）
 
 新しい public API は追加していない（API Extractor gate で surface 不変を保証）。

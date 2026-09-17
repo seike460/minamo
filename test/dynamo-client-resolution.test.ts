@@ -84,4 +84,31 @@ describe("DynamoEventStore client resolution", () => {
     expect(() => new DynamoEventStore<CounterEvents>(null as never)).toThrow(TypeError);
     expect(() => new DynamoSnapshotStore(null as never)).toThrow(TypeError);
   });
+
+  it("client が send を持たない / clientConfig が非 object → constructor で TypeError", () => {
+    // `send` 欠落の client は初回 `.send()` まで設定ミスが持ち越されるため弾く。
+    // 非 object の clientConfig は SDK constructor への素通りで SDK 実装依存の
+    // 挙動になるため、エラー有無をライブラリ側で決定的にする。
+    for (const badClient of [{}, null, 42, { send: "not-a-function" }]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: "t",
+            client: badClient as never,
+          }),
+      ).toThrow(TypeError);
+      expect(() => new DynamoSnapshotStore({ tableName: "t", client: badClient as never })).toThrow(
+        TypeError,
+      );
+    }
+    for (const badConfig of [42, "cfg", []]) {
+      expect(
+        () =>
+          new DynamoEventStore<CounterEvents>({
+            tableName: "t",
+            clientConfig: badConfig as never,
+          }),
+      ).toThrow(TypeError);
+    }
+  });
 });

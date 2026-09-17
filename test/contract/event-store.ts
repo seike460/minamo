@@ -3,7 +3,7 @@ import type { EventMap, EventStore } from "../../src/index.js";
 import { ConcurrencyError, EventLimitError } from "../../src/index.js";
 
 /**
- * Event Store Contract Tests (CT-01 〜 CT-22)。
+ * Event Store Contract Tests (CT-01 〜 CT-24 + 派生ケース)。
  *
  * 単一 suite を InMemoryEventStore と DynamoEventStore の両方で実行し、
  * concept.md §1 痛み C (InMemory と本番の振る舞い差異) を構造的に抑え込む。
@@ -328,6 +328,19 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
         }),
       ).rejects.toBeInstanceOf(TypeError);
       expect(await store.load("agg-19")).toEqual([]);
+    });
+
+    it("CT-19b non-object options → TypeError (silent skip を防ぐ)", async () => {
+      const store = await makeStore();
+      // `options: 42` 等は `options?.correlationId` が undefined に揃って静かに
+      // 無視されるため、両 store の入口で同じ TypeError に揃える。配列・関数も
+      // `correlationId` を持てないため同じく拒否する。
+      for (const bad of [null, 42, "options", [], () => {}]) {
+        await expect(
+          store.append("agg-19b", [{ type: "Incremented", data: { amount: 1 } }], 0, bad as never),
+        ).rejects.toBeInstanceOf(TypeError);
+      }
+      expect(await store.load("agg-19b")).toEqual([]);
     });
 
     it("CT-20 append の返り値は入力 event と参照を共有しない", async () => {

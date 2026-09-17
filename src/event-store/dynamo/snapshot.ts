@@ -4,6 +4,7 @@ import {
   assertAggregateId,
   assertSnapshot,
   assertTableName,
+  isObjectRecord,
   normalizePlainData,
 } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
@@ -27,8 +28,8 @@ function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
 function fromSnapshotItem<TState>(item: Record<string, unknown>): Snapshot<TState> {
   // `fromItem` (marshaller.ts) と同じく `Object.hasOwn` + 型検査を併用する:
   // unmarshall の __proto__ 汚染で prototype 経由に供給された偽装 field を弾く。
-  if (item === null || typeof item !== "object") {
-    // mock client 由来の非 object item で生 TypeError に落ちないよう防御する。
+  if (!isObjectRecord(item)) {
+    // mock client 由来の非 object item (null・配列等) で生 TypeError に落ちないよう防御する。
     throw new TypeError("DynamoDB snapshot item is not an object");
   }
   if (!Object.hasOwn(item, "aggregateId") || typeof item.aggregateId !== "string") {

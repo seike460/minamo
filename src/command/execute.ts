@@ -9,6 +9,7 @@ import {
   assertPlainData,
   assertSnapshotStoreShape,
   clip,
+  isObjectRecord,
   normalizePlainData,
 } from "../internal/guards.js";
 import type { ExecuteObserver } from "../observability.js";
@@ -86,9 +87,11 @@ function replayEvents<TState, TMap extends EventMap>(
     const raw = events[i];
     // sparse array / undefined / 非 object 要素は malformed stream として fail-loud する。
     // (skip すると evolve ループで raw TypeError になり診断情報が失われる)
-    if (raw === null || typeof raw !== "object") {
+    if (!isObjectRecord(raw)) {
       throw new TypeError(
-        `event at index ${i} is not a StoredEvent (got ${raw === null ? "null" : typeof raw})`,
+        `event at index ${i} is not a StoredEvent (got ${
+          raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw
+        })`,
       );
     }
 
@@ -144,7 +147,7 @@ function replayEvents<TState, TMap extends EventMap>(
     // `data` の存在も要求する: custom store 由来のイベントに data が無いと evolve に
     // undefined が流れ、永続化形式 (write 側は data 必須) との静かな乖離になる。
     const e = upcast === undefined ? raw : (upcast(raw) as StoredEventsOf<TMap>);
-    if (e === null || typeof e !== "object" || typeof e.type !== "string") {
+    if (!isObjectRecord(e) || typeof e.type !== "string") {
       throw new TypeError(
         upcast === undefined
           ? `event at index ${i} has no string type`
@@ -243,9 +246,11 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
     if (snapshot !== null) {
       // null 以外の非 object (undefined 含む) を返す custom store の契約違反を
       // プロパティアクセスの生 TypeError ではなく明示的に弾く。
-      if (typeof snapshot !== "object") {
+      if (!isObjectRecord(snapshot)) {
         throw new TypeError(
-          `SnapshotStore.load must return Snapshot | null (got ${typeof snapshot})`,
+          `SnapshotStore.load must return Snapshot | null (got ${
+            Array.isArray(snapshot) ? "array" : typeof snapshot
+          })`,
         );
       }
       // custom SnapshotStore の契約違反を弾く (strict 方針): 別 aggregate の snapshot や
@@ -287,11 +292,7 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
         // filter は replayEvents の shape 検証より先に e.version に触れるため、
         // malformed 要素 (null / version 欠落) をここで fail-loud に弾く。
         for (const e of loaded) {
-          if (
-            e === null ||
-            typeof e !== "object" ||
-            typeof (e as { version?: unknown }).version !== "number"
-          ) {
+          if (!isObjectRecord(e) || typeof (e as { version?: unknown }).version !== "number") {
             throw new TypeError(
               "EventStore.load returned a malformed event (missing numeric version)",
             );
@@ -393,7 +394,7 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     throw new RangeError(`maxRetries must be a non-negative integer, got: ${String(maxRetries)}`);
   }
   if (snapshotPolicy !== undefined) {
-    if (snapshotPolicy === null || typeof snapshotPolicy !== "object") {
+    if (!isObjectRecord(snapshotPolicy)) {
       throw new TypeError("snapshotPolicy must be an object");
     }
     // NaN / ±Infinity は `everyNEvents < 1` の「無効化」分岐をすり抜けて
@@ -416,7 +417,12 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     throw new TypeError("handler must be a function");
   }
   assertEventStoreShape(store);
-  if (observer !== undefined && (observer === null || typeof observer !== "object")) {
+  // `ExecuteObserver` は method signature のため `is Record` で narrow すると
+  // hook の呼び出し型が潰れる。実行側では hook を呼ぶため inline 判定に留める。
+  if (
+    observer !== undefined &&
+    (observer === null || typeof observer !== "object" || Array.isArray(observer))
+  ) {
     throw new TypeError("observer must be an object of ExecuteObserver hooks");
   }
   if (snapshotStore !== undefined) {
@@ -455,12 +461,7 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     // する。`in` ではなく hasOwn を使い、Object.prototype 由来の名前 (toString 等) も確実に弾く。
     for (let i = 0; i < decided.length; i++) {
       const d = decided[i];
-      if (
-        d === null ||
-        typeof d !== "object" ||
-        typeof d.type !== "string" ||
-        d.type.length === 0
-      ) {
+      if (!isObjectRecord(d) || typeof d.type !== "string" || d.type.length === 0) {
         throw new TypeError(`handler returned an invalid event at index ${i}`);
       }
       // `data: undefined` も弾く: removeUndefinedValues で Dynamo 側は属性ごと消え、
@@ -563,8 +564,7 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     for (let i = 0; i < newEvents.length; i++) {
       const e = newEvents[i];
       if (
-        e === null ||
-        typeof e !== "object" ||
+        !isObjectRecord(e) ||
         typeof e.type !== "string" ||
         e.aggregateId !== aggregateId ||
         e.version !== aggregate.version + i + 1

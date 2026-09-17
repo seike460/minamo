@@ -1,5 +1,6 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { isObjectRecord } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 
 /**
@@ -53,7 +54,23 @@ const RECOMMENDED_UNMARSHALL_OPTIONS = {
  * - どちらも未指定なら default `DynamoDBClient` を生成し推奨 marshallOptions で wrap
  */
 export function resolveDocumentClient(config: DynamoEventStoreConfig): DynamoDBDocumentClient {
-  if (config.client !== undefined) return config.client;
+  if (config.client !== undefined) {
+    // `send` を持たない持参 client は初回 `.send()` 呼び出しまで設定ミスが
+    // 持ち越されるため constructor 経路で弾く (tableName 検証と同じ fail-early 方針)。
+    // 最小 shape のみ要求する — mock/test double が `send` のみ実装する用法を壊さない。
+    if (
+      config.client === null ||
+      typeof (config.client as { send?: unknown }).send !== "function"
+    ) {
+      throw new TypeError("config.client must be a DynamoDBDocumentClient (missing send method)");
+    }
+    return config.client;
+  }
+  // 非 object の clientConfig は `?? {}` の射程外で SDK constructor に素通りし、
+  // エラー有無が SDK 実装依存になるため入口で弾く。
+  if (config.clientConfig !== undefined && !isObjectRecord(config.clientConfig)) {
+    throw new TypeError("config.clientConfig must be a DynamoDBClientConfig object");
+  }
 
   // AWS SDK は optional peer のため遅延解決する (DEC-027)。
   // `config.client` 持参の consumer は SDK import を一切必要としない。

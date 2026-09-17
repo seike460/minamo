@@ -664,8 +664,10 @@ describe("executeCommand", () => {
     for (const bad of [
       null,
       "not-an-object",
+      [], // 配列は object だが initialState/evolve を持てない
       { evolve: {} }, // initialState 欠落 → state: undefined の静かな生成を防ぐ
       { initialState: 0 }, // evolve 欠落
+      { initialState: 0, evolve: [] }, // 配列 evolve → hasOwn が常に false の静かな退化
       { initialState: 0, evolve: {}, upcast: 42 }, // upcast が非関数
     ]) {
       await expect(
@@ -696,15 +698,19 @@ describe("executeCommand", () => {
       ["store が null", { store: null }],
       ["store.load 欠落", { store: { append: async () => [] } }],
       ["store.append 欠落", { store: { load: async () => [] } }],
-      // 非 object の observer は `observer?.onX` が全て silent skip になるため弾く
+      // 非 object の observer は `observer?.onX` が全て silent skip になるため弾く。
+      // 配列も hook field を持てず同じく silent skip になるため拒否する。
       ["observer が非 object", { observer: 42 }],
       ["observer が null", { observer: null }],
+      ["observer が配列", { observer: [] }],
       ["snapshotStore が非 object", { snapshotStore: 42 }],
       ["snapshotStore に load が無い", { snapshotStore: { save: async () => {} } }],
       ["snapshotStore に save が無い", { snapshotStore: { load: async () => null } }],
-      // null / 非 object の snapshotPolicy は `.everyNEvents` アクセスが生 TypeError になるため弾く
+      // null / 非 object / 配列の snapshotPolicy は `.everyNEvents` アクセスが
+      // 生 TypeError または silent skip になるため弾く
       ["snapshotPolicy が null", { snapshotPolicy: null }],
       ["snapshotPolicy が非 object", { snapshotPolicy: 42 }],
+      ["snapshotPolicy が配列", { snapshotPolicy: [] }],
     ];
     for (const [name, over] of cases) {
       await expect(executeCommand({ ...base, ...over } as never), name).rejects.toBeInstanceOf(

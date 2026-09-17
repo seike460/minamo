@@ -1,7 +1,7 @@
 import type { AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEvent } from "../core/types.js";
 import { InvalidStreamRecordError } from "../errors.js";
-import { clip, normalizePlainData } from "../internal/guards.js";
+import { clip, isObjectRecord, normalizePlainData } from "../internal/guards.js";
 import { requirePeer } from "../internal/require-peer.js";
 
 /** `parseStreamRecord` の optional な挙動切替。 */
@@ -45,6 +45,11 @@ export function parseStreamRecord<
   if (!Array.isArray(eventNames)) {
     throw new TypeError("eventNames must be an array");
   }
+  // 非 object の options は `options?.ignoreUnknownTypes` が undefined に揃って
+  // strict mode として静かに無視されるため入口で弾く。
+  if (options !== undefined && !isObjectRecord(options)) {
+    throw new TypeError("options must be an object");
+  }
   const rec = record as {
     eventName?: string;
     dynamodb?: { NewImage?: Record<string, unknown>; Keys?: Record<string, unknown> };
@@ -78,7 +83,7 @@ export function parseStreamRecord<
   }
   // NewImage が `{ NULL: true }` 等だと unmarshall は null を返す。
   // `Object.hasOwn(null, ...)` は生 TypeError になるため missing_field に揃える。
-  if (item === null || typeof item !== "object") {
+  if (!isObjectRecord(item)) {
     throw new InvalidStreamRecordError(
       "missing_field",
       "NewImage did not unmarshall to an item object",
@@ -168,5 +173,12 @@ export function parseStreamRecord<
 export function eventNamesOf<TState, TMap extends EventMap>(
   config: AggregateConfig<TState, TMap>,
 ): ReadonlyArray<keyof TMap & string> {
-  return Object.keys(config.evolve) as Array<keyof TMap & string>;
+  // `evolve` が非 object だと `Object.keys` は string の index 配列等の garbage を
+  // 返し、結果の eventNames が全件 unknown_type 判定になる静かな破綻を生む。
+  // (assertAggregateConfig ではなく evolve だけを見る: 本関数の依存は evolve のみ)
+  const evolve = (config as { evolve?: unknown } | null | undefined)?.evolve;
+  if (!isObjectRecord(evolve)) {
+    throw new TypeError("config.evolve must be an object map of evolve handlers");
+  }
+  return Object.keys(evolve) as Array<keyof TMap & string>;
 }

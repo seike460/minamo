@@ -124,7 +124,7 @@ function formatIssues(issues: readonly StandardSchemaIssue[]): string {
 function formatIssue(issue: StandardSchemaIssue): string {
   // vendor 実装が spec 非準拠の issue (null / path 非配列 / message 非文字列) を
   // 返しても生 TypeError に落とさず、読める message に fallback する。
-  if (issue === null || typeof issue !== "object") return String(issue);
+  if (issue === null || typeof issue !== "object" || Array.isArray(issue)) return String(issue);
   const message = typeof issue.message === "string" ? issue.message : String(issue.message);
   if (!Array.isArray(issue.path) || issue.path.length === 0) return message;
   const path = issue.path

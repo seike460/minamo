@@ -303,6 +303,57 @@ describe("validate (Standard Schema)", () => {
     await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
   });
 
+  it("ignores inherited `issues` and returns own `value` (prototype spoofing 防御)", async () => {
+    // `result.issues` を prototype chain まで辿ると、own `value` を持つ正常な
+    // 成功結果が inherited issues によって failure に誤分類される。Result は
+    // plain object 契約のため own property のみを見る。
+    const proto = { issues: [{ message: "inherited" }] };
+    const forged = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "forged",
+        validate: () => Object.assign(Object.create(proto), { value: "ok" }),
+      },
+    };
+    await expect(validate(forged as never, "x")).resolves.toBe("ok");
+  });
+
+  it("treats own `issues: []` as failure and own `issues: undefined` as success", async () => {
+    // Standard Schema の Result は `{issues}` か `{value}` の判別 union。
+    // `issues` が own property として存在すれば空配列でも failure、
+    // `undefined` 値なら成功側にフォールスルーして `value` を読む。
+    const emptyIssues = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "empty-issues",
+        validate: () => ({ issues: [] }),
+      },
+    };
+    await expect(validate(emptyIssues as never, "x")).rejects.toBeInstanceOf(ValidationError);
+
+    const undefinedIssues = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "undefined-issues",
+        validate: () => ({ issues: undefined, value: "ok" }),
+      },
+    };
+    await expect(validate(undefinedIssues as never, "x")).resolves.toBe("ok");
+  });
+
+  it("throws TypeError when a schema returns an array result", async () => {
+    // 配列は `typeof === "object"` を通るが `{value}`/`{issues}` を持てないため
+    // "non-object result" として弾く (own `issues`/`value` 欠落診断より正確)。
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ["not", "a", "result"],
+      },
+    };
+    await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("infers Output via InferSchemaOutput from concrete schema", () => {
     // 型レベルのみの regression gate: validate 戻り値が Output に narrow されることを
     // expectTypeOf で compile-time に検証する。runtime assertion は上の happy-path ケースで担保。
@@ -321,6 +372,7 @@ describe("validate (Standard Schema)", () => {
       "schema",
       {}, // ~standard 欠落
       { "~standard": null },
+      { "~standard": [] }, // 配列は validate field を持てない
       { "~standard": {} }, // validate 欠落
       { "~standard": { validate: 42 } }, // validate が非関数
     ]) {
