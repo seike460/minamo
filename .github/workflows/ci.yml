@@ -14,17 +14,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  dependency-review:
-    # PR が持ち込む依存の CVE / ライセンス差分を検査する。
-    # dependabot は既存依存の更新を追うが、PR 起因の新規脆弱依存はここで止める。
-    if: github.event_name == 'pull_request'
+  audit:
+    # lockfile の既知脆弱性を検査する。dependabot は既存依存の更新を追うが、
+    # PR 起因の新規脆弱依存を含め lockfile 全体の後退はここで止める。
+    # (dependency-review-action は repo の dependency graph 有効化が前提のため不使用)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Dependency Review
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies (moderate+)
+        run: pnpm audit --audit-level=moderate
 
   build-and-test:
     runs-on: ubuntu-latest
