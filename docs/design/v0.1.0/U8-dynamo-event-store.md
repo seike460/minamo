@@ -197,10 +197,10 @@ async append(aggregateId, events, expectedVersion, options?):
 
 **設計判断**:
 
-1. **ConditionCheck action を追加しない** — 各 Put の `ConditionExpression: "attribute_not_exists(version)"` で十分。ConditionCheck action を別途入れると 100 ops の枠を 1 消費する。N=99 上限は ConditionCheck なしで実現
+1. **expectedVersion > 0 のとき ConditionCheck action を 1 つ前置する** — 各 Put の `ConditionExpression: "attribute_not_exists(version)"` だけでは「expectedVersion が実 stream より大きい」ギャップ (skip された version への書き込み) を検出できない。直前 version の `attribute_exists` ConditionCheck で両方向の競合を ConditionalCheckFailed に集約する。100 ops 上限に対し Put 最大 99 + ConditionCheck 1 で収まる (expectedVersion === 0 は先頭 Put の `attribute_not_exists` が担保するため ConditionCheck 不要)
 2. **timestamp を 1 回生成** — 同 transaction 内の全 event で同じ timestamp。consumer の「この command で起きたこと」の識別が容易
-3. **size check は JSON.stringify ベースの近似** — DynamoDB の正確な item size (attribute name 含む) を計算するのは重い。approximate で conservatively check し、SIZE_SLACK_BYTES のマージンを取る
-4. **CancellationReasons の判別** — TransactWriteItems 失敗時、`err instanceof TransactionCanceledException` で `CancellationReasons[i].Code` が `ConditionalCheckFailed` を含めば concurrency 判定。他の reason (`ThrottlingError` 等) は別エラーで透過
+3. **size check は JSON.stringify ベースの近似** — DynamoDB の正確な item size (attribute name 含む) を計算するのは重い。approximate で conservatively check し、SIZE_SLACK_BYTES のマージンを per-item / transaction 合計の双方に取る
+4. **CancellationReasons の判別** — TransactWriteItems 失敗時、`err instanceof TransactionCanceledException` (または name 一致) で `CancellationReasons[i].Code` が `ConditionalCheckFailed` または `TransactionConflict` を含めば concurrency 判定 (§11 参照)。他の reason (`ThrottlingError` 等) は別エラーで透過
 
 ### 6.3 load
 
@@ -389,7 +389,7 @@ v0.1.0 では hook を embed せず、call site のコメントで "OTel span he
 | Error | 条件 |
 |---|---|
 | `EventLimitError` | events=[], N>99, single event > 400KB, total > 4MB - slack |
-| `ConcurrencyError` | TransactionCanceledException with any CancellationReason.Code === "ConditionalCheckFailed" |
+| `ConcurrencyError` | TransactionCanceledException with any CancellationReason.Code === "ConditionalCheckFailed" or "TransactionConflict" |
 | AWS SDK エラー (透過) | ThrottlingException, ProvisionedThroughputExceededException, network error, etc. |
 
 instanceof 分岐:
@@ -397,13 +397,22 @@ instanceof 分岐:
 ```ts
 catch (err: unknown) {
   if (err instanceof TransactionCanceledException) {
-    if (err.CancellationReasons?.some(r => r.Code === "ConditionalCheckFailed")) {
+    if (err.CancellationReasons?.some(r =>
+      r.Code === "ConditionalCheckFailed" || r.Code === "TransactionConflict"
+    )) {
       throw new ConcurrencyError(aggregateId, expectedVersion);
     }
   }
   throw err;
 }
 ```
+
+> **`TransactionConflict` の map 追加 (v0.2.0 以降の correctness fix):** 全 TransactItem が
+> 単一 aggregate のキーを指すため、`TransactionConflict` は同一 stream への並行
+> transaction との衝突を意味する。transaction は rollback 済みで副作用を残さないため、
+> `ConditionalCheckFailed` と同じく retry 安全な競合として `ConcurrencyError` に map する。
+> map しなければ同時書き込み競合が未分類の SDK エラーとして呼び出し側に漏れ、
+> `executeCommand` の自動リトライ経路を素通りしていた。
 
 TransactionCanceledException が `@aws-sdk/client-dynamodb` から re-export されることを確認 (AWS SDK v3 の標準)。
 
@@ -421,7 +430,7 @@ TransactionCanceledException が `@aws-sdk/client-dynamodb` から re-export さ
 
 ## § Accepted Trade-offs
 
-- **ConditionCheck action を別途持たない** (Put 各々の `attribute_not_exists(version)` で代替): N=99 を実現するために採用。副作用として、「どの version が衝突したか」の検出情報が失われる (TransactionCanceledException の CancellationReasons index は Put の index を指す)。ConcurrencyError には expectedVersion しか入らないため consumer が最新 version を知るには再 load する
+- **ConditionCheck は expectedVersion > 0 のとき 1 つだけ** (Put 各々の `attribute_not_exists(version)` と併用): ギャップ検出 (expectedVersion が実 stream より大きいケース) に必要なため採用。副作用として、「どの version が衝突したか」の検出情報が失われる (TransactionCanceledException の CancellationReasons index は失敗した item の index を指す)。ConcurrencyError には expectedVersion しか入らないため consumer が最新 version を知るには再 load する
 - **approximate size check**: DynamoDB の真の item size (attribute name の UTF-8 byte count を含む) を完全計算しない。SIZE_SLACK_BYTES マージンで overshoot を防ぐが、巨大な attribute name を使う consumer は unexpected に limit を超えることがある。docs で "attribute name は短く" を推奨
 - **marshaller で runtime 型検証を最小化**: type / version / timestamp 等の primary field のみ assert。data の shape は consumer 責務 (DEC-013 と同じ philosophy)
 - **client を instance 所有しない**: constructor で resolve したものを保持するが、`dispose` を呼ばない。consumer が管理する (Lambda lifecycle で自然に解放)

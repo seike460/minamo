@@ -277,11 +277,12 @@ describe("executeCommand", () => {
     expect(await inner.load("agg-1")).toHaveLength(1); // commit は残る
   });
 
-  it("CT-EC-19 post-commit の evolve が ConcurrencyError を投げても retry しない", async () => {
+  it("CT-EC-19 evolve が ConcurrencyError を投げても retry せず append も実行されない", async () => {
     const inner = new InMemoryEventStore<CounterEvents>();
     const store = new CountingStore<CounterEvents>(inner);
-    // evolve が ConcurrencyError を投げる consumer bug。初回 load は空 stream なので
-    // evolve は append 後の post-commit 適用でのみ発火する。
+    // evolve が ConcurrencyError を投げる consumer bug。evolve の適用は append 前に
+    // 行われる (commit 後の失敗で「書き込み済みなのに失敗に見える」状態を防ぐため) ので、
+    // この ConcurrencyError は append に到達する前に伝播する。
     const config = {
       initialState: 0,
       evolve: {
@@ -299,8 +300,8 @@ describe("executeCommand", () => {
         input: { amount: 1 },
       }),
     ).rejects.toBeInstanceOf(ConcurrencyError);
-    expect(store.appendCalls).toBe(1); // 内部 retry なし = 二重 append なし
-    expect(await inner.load("agg-1")).toHaveLength(1);
+    expect(store.appendCalls).toBe(0); // append 未実行 = 二重 append も partial write も無し
+    expect(await inner.load("agg-1")).toHaveLength(0);
   });
 
   it("CT-EC-16 deterministic handler produces identical events on retry", async () => {
@@ -321,5 +322,128 @@ describe("executeCommand", () => {
     expect(produced).toHaveLength(2);
     expect(produced[0]).toEqual([{ amount: 9 }]);
     expect(produced[1]).toEqual([{ amount: 9 }]);
+  });
+
+  it("CT-EC-20 handler が非配列を返す → TypeError (no-op 誤認しない)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    for (const bad of [
+      { length: 0 },
+      { type: "Incremented", data: { amount: 1 } }, // 単一 event オブジェクト
+      Promise.resolve([]), // async handler の付け忘れ
+    ]) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: (() => bad) as never,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(store.appendCalls).toBe(0);
+  });
+
+  it("CT-EC-21 handler が data 無し event を返す → TypeError (commit 前)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: (() => [{ type: "Incremented" }]) as never,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(store.appendCalls).toBe(0);
+  });
+
+  it("CT-EC-22 evolve に undefined が登録された type の emit → missing_evolve_handler (commit 前)", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    const store = new CountingStore<CounterEvents>(inner);
+    // `{ Incremented: undefined }` のような壊れた登録: hasOwn は true だが callable でない。
+    // 旧来の in 判定や hasOwn 単独では「永続化されるが state に反映されない」静かな乖離を
+    // 許してしまうため、呼び出し可能であることまでを commit 前に検証する。
+    const config = {
+      initialState: 0,
+      evolve: { Incremented: undefined },
+    } as never;
+    await expect(
+      executeCommand({
+        config,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(InvalidEventStreamError);
+    expect(store.appendCalls).toBe(0);
+    expect(await inner.load("agg-1")).toHaveLength(0);
+  });
+
+  it("CT-EC-23 EventStore.append が個数違いを返す → TypeError (postcondition)", async () => {
+    const store = {
+      async load() {
+        return [];
+      },
+      async append(_id: string, events: ReadonlyArray<unknown>) {
+        // 契約違反: 入力より少ない件数を返す custom store
+        return events.slice(0, events.length - 1) as never;
+      },
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("CT-EC-24 EventStore.load が非配列を返す → TypeError", async () => {
+    const store = {
+      async load() {
+        return { length: 1 } as never;
+      },
+      async append() {
+        return [];
+      },
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("CT-EC-25 aggregateId / correlationId の契約違反 → TypeError (load 前)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "",
+        input: { amount: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+        correlationId: 42 as unknown as string,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });

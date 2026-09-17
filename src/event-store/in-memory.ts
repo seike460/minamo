@@ -1,5 +1,11 @@
 import type { EventMap, EventsOf, StoredEvent, StoredEventsOf } from "../core/types.js";
 import { ConcurrencyError, EventLimitError } from "../errors.js";
+import {
+  assertAfterVersion,
+  assertAggregateId,
+  assertAppendOptions,
+  assertDomainEvents,
+} from "../internal/guards.js";
 import type { AppendOptions, EventStore } from "./types.js";
 
 type AnyStored = StoredEvent<string, unknown>;
@@ -10,7 +16,7 @@ type AnyStored = StoredEvent<string, unknown>;
  * - DynamoEventStore と同じ汎用制約を実装する (version 検証、ギャップ検出、
  *   ConcurrencyError、空配列で EventLimitError、fresh read 保証)
  * - DynamoDB 固有のサイズ制約 (400KB / 4MB) は検証しない (DEC-006)
- * - Contract Tests (CT-01〜16) で DynamoEventStore との振る舞い一致を保証する
+ * - Contract Tests (CT-01〜20) で DynamoEventStore との振る舞い一致を保証する
  * - append 入力と load/loadFrom/allEvents の返り値は structuredClone で caller と切り離す
  *   (DynamoDB の marshall/unmarshall 相当の隔離)。structuredClone 不可能な非 plain data
  *   (関数・class instance 等、DEC-011 違反) は `DataCloneError` で伝播する
@@ -35,9 +41,12 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
         `expectedVersion must be a non-negative integer (got ${String(expectedVersion)})`,
       );
     }
+    assertAggregateId(aggregateId);
+    assertAppendOptions(aggregateId, options);
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
+    assertDomainEvents(aggregateId, events);
 
     const existing = this.#streams.get(aggregateId) ?? [];
     const currentVersion = existing.length;
@@ -62,15 +71,18 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
 
     // DynamoDB の marshall round-trip と同じく、保存時に live object と切り離す (痛み C 対策)。
     // structuredClone を通せない非 plain data (関数・class instance 等) はここで fail-loud に検出
-    // される (DEC-011)。返り値は caller 所有のオリジナル (呼び出し側の変更は store に波及しない)。
+    // される (DEC-011)。
     const persisted = structuredClone(stored) as AnyStored[];
     this.#streams.set(aggregateId, [...existing, ...persisted]);
     this.#insertionOrder.push(...persisted);
 
-    return stored as ReadonlyArray<StoredEventsOf<TMap>>;
+    // 返り値も clone する: `stored` は入力 `events[i].data` と参照を共有するため、
+    // caller が append 後に input を mutate すると返り値が永続化内容と食い違う。
+    return structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
   }
 
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
     const events = this.#streams.get(aggregateId);
     if (events === undefined) return [];
     // DynamoDB の unmarshall と同様、返すたびに複製して呼び出し側の mutation から隔離する。
@@ -88,6 +100,8 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     aggregateId: string,
     afterVersion: number,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
+    assertAfterVersion(afterVersion);
     const events = this.#streams.get(aggregateId);
     if (events === undefined) return [];
     return structuredClone(events.filter((e) => e.version > afterVersion)) as ReadonlyArray<

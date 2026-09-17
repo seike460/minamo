@@ -3,7 +3,7 @@ import { InMemoryEventStore } from "../src/index.js";
 import { type CounterEvents, registerEventStoreContract } from "./contract/event-store.js";
 
 /**
- * U4 Contract Tests (CT-01〜16) を InMemoryEventStore 対象で実行。
+ * U4 Contract Tests (CT-01〜20) を InMemoryEventStore 対象で実行。
  * 同一 suite が U8 DynamoEventStore でも走ることで concept.md §1 痛み C
  * (InMemory と本番の振る舞い差異) を構造的に抑える。
  */

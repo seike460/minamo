@@ -5,7 +5,7 @@ import {
 } from "./contract/snapshot-store.js";
 
 /**
- * SnapshotStore Contract Tests (CT-SS-01〜05) を InMemorySnapshotStore 対象で実行。
+ * SnapshotStore Contract Tests (CT-SS-01〜07) を InMemorySnapshotStore 対象で実行。
  * DynamoSnapshotStore 側は test/dynamodb.integration.test.ts で同 suite を走らせる。
  */
 registerSnapshotStoreContract({

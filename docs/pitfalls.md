@@ -54,10 +54,17 @@ For local development or testing where you want projections to fire synchronousl
 
 ```ts
 class ProjectedEventStore<TMap extends EventMap> implements EventStore<TMap> {
+  // loadFrom is optional on EventStore — forward it only when the inner store
+  // implements it, or snapshot-based partial rehydration silently degrades to
+  // a full load() + filter.
+  readonly loadFrom?: EventStore<TMap>["loadFrom"];
+
   constructor(
     private inner: EventStore<TMap>,
     private onStored: (events: ReadonlyArray<StoredEventsOf<TMap>>) => void,
-  ) {}
+  ) {
+    if (inner.loadFrom) this.loadFrom = inner.loadFrom.bind(inner);
+  }
 
   async append(...args: Parameters<EventStore<TMap>["append"]>) {
     const stored = await this.inner.append(...args);
@@ -139,4 +146,25 @@ Automatic retry happens when `append` throws `ConcurrencyError` (optimistic-lock
 
 If you want retries for transient SDK errors, wrap `DynamoEventStore` in a retrying `EventStore` adapter on the consumer side. Do not conflate the two retry layers.
 
-Only errors thrown by `store.append` itself are eligible for the automatic retry. If your `evolve` or `ExecuteObserver.onCommitted` throws a `ConcurrencyError` *after* the append has already committed, it propagates to the caller **without** a retry — retrying it would re-append the same events. This also means a caller that sees `ConcurrencyError` cannot assume the command was not committed; if you surface this error to end users, re-read the stream (or use your own idempotency key) before asking them to retry.
+Only errors thrown by `store.append` itself are eligible for the automatic retry. `evolve` runs **before** the append (so a throwing `evolve` prevents the commit entirely), while `ExecuteObserver.onCommitted` and snapshot saves run *after* the commit. If `onCommitted` throws a `ConcurrencyError`, it propagates to the caller **without** a retry — retrying it would re-append the same events. This also means a caller that sees `ConcurrencyError` cannot assume the command was not committed; if you surface this error to end users, re-read the stream (or use your own idempotency key) before asking them to retry.
+
+Each retry re-runs the full cycle (load → rehydrate → handler → append), so `maxRetries` directly multiplies the worst-case read cost of a contended command.
+
+---
+
+## 8. Runtime validation and DynamoDB parity
+
+Both built-in stores enforce the same input contract, so an `InMemoryEventStore` test cannot silently diverge from `DynamoEventStore` behaviour:
+
+- `aggregateId` must be a non-empty string of at most 2048 UTF-8 bytes (the DynamoDB partition-key limit) — `TypeError` otherwise, on `append` / `load` / `loadFrom` / `SnapshotStore` alike
+- every event needs a non-empty string `type` and an own `data` property — `EventLimitError` otherwise. A malformed event committed to a real stream would poison every future `rehydrate`, so `append` rejects it before any write
+- `correlationId`, when provided, must be a string — `TypeError` otherwise (a non-string would marshall as a number and silently vanish on read)
+
+Two type-level constraints to know about:
+
+- `EventMap` is `Record<string, unknown>`, so declare event maps with `type` aliases. An `interface` without an index signature does **not** satisfy the constraint.
+- Event `data` must not be `undefined` at runtime. `structuredClone` keeps `undefined` fields but DynamoDB `marshall` drops them — the InMemory and DynamoDB stores would persist different payloads. Declare payload fields optional instead (`{ activatedAt?: string }`).
+
+For the same reason `executeCommand` validates the `EventStore` / `SnapshotStore` contracts at runtime (load must return an array, append must return exactly the committed events with sequential versions, snapshots must carry `aggregateId` / `version` / `state`). A custom store that violates the contract fails loudly with `TypeError` instead of corrupting the stream.
+
+Finally, `DynamoEventStore` maps a `TransactionCanceledException` whose cancellation reason is `TransactionConflict` — not just `ConditionalCheckFailed` — to `ConcurrencyError`, so same-aggregate contention under parallel transactions is retried by `executeCommand` like any other optimistic-locking collision.

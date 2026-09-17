@@ -238,6 +238,30 @@ describe("validate (Standard Schema)", () => {
     await expect(validate(schema, {})).rejects.toThrow(/0\.items\.3: too short/);
   });
 
+  it("throws TypeError when a schema returns non-array issues", async () => {
+    // Standard Schema 非準拠の schema を防御: 非配列 issues を ValidationError に
+    // 流すと consumer が issues.map 等で生 TypeError を踏む
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ({ issues: "not-an-array" }),
+      },
+    };
+    await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("throws TypeError when a schema returns neither value nor issues", async () => {
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ({}),
+      },
+    };
+    await expect(validate(bad as never, "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("infers Output via InferSchemaOutput from concrete schema", () => {
     // 型レベルのみの regression gate: validate 戻り値が Output に narrow されることを
     // expectTypeOf で compile-time に検証する。runtime assertion は上の happy-path ケースで担保。

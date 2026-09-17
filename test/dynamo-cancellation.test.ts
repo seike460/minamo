@@ -7,8 +7,11 @@ import type { CounterEvents } from "./fixtures/counter.js";
 /**
  * U8 design §6.2 / §11: TransactWriteItems 失敗時のエラー分類。
  *
- * - `TransactionCanceledException` で `CancellationReasons[i].Code === "ConditionalCheckFailed"`
- *   が 1 つ以上あれば → `ConcurrencyError(aggregateId, expectedVersion)` に map
+ * - `TransactionCanceledException` で `CancellationReasons[i].Code` が
+ *   `"ConditionalCheckFailed"` または `"TransactionConflict"` を 1 つ以上含む
+ *   → `ConcurrencyError(aggregateId, expectedVersion)` に map
+ *   (TransactionConflict は全 TransactItem が単一 aggregate key を指すため
+ *   同一 stream の同時書き込み競合を意味し、rollback 済みなので retry 安全)
  * - それ以外の SDK エラー (ThrottlingException, ProvisionedThroughputExceededException 等) は
  *   そのまま透過 (concept.md §5.5 末尾)
  */
@@ -80,9 +83,18 @@ describe("DynamoEventStore TransactionCanceledException mapping", () => {
     ).rejects.toBe(foreignException);
   });
 
-  it("does not map when no CancellationReason is ConditionalCheckFailed", async () => {
+  it("maps CancellationReasons[*].Code === TransactionConflict → ConcurrencyError", async () => {
     const { store } = makeStore(async () => {
       throw newCanceledException(["TransactionConflict"]);
+    });
+    await expect(
+      store.append("agg-3", [{ type: "Incremented", data: { amount: 1 } }], 0),
+    ).rejects.toBeInstanceOf(ConcurrencyError);
+  });
+
+  it("does not map when no CancellationReason is retryable contention", async () => {
+    const { store } = makeStore(async () => {
+      throw newCanceledException(["ProvisionedThroughputExceeded"]);
     });
     await expect(
       store.append("agg-3", [{ type: "Incremented", data: { amount: 1 } }], 0),

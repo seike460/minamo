@@ -54,10 +54,17 @@ TypeScript は tuple narrowing の過程で `{ signedAt?: undefined }` を派生
 
 ```ts
 class ProjectedEventStore<TMap extends EventMap> implements EventStore<TMap> {
+  // loadFrom は EventStore の optional method。inner が実装する場合だけ転送する —
+  // 転送を忘れると snapshot 起点の部分 rehydration が load() 全件 + filter に
+  // 静かに退化する。
+  readonly loadFrom?: EventStore<TMap>["loadFrom"];
+
   constructor(
     private inner: EventStore<TMap>,
     private onStored: (events: ReadonlyArray<StoredEventsOf<TMap>>) => void,
-  ) {}
+  ) {
+    if (inner.loadFrom) this.loadFrom = inner.loadFrom.bind(inner);
+  }
 
   async append(...args: Parameters<EventStore<TMap>["append"]>) {
     const stored = await this.inner.append(...args);
@@ -139,4 +146,25 @@ minamo の Contract Tests は `InMemoryEventStore` / `DynamoEventStore` の以�
 
 SDK の transient error に対するリトライが必要なら、`DynamoEventStore` をリトライ付き `EventStore` で wrap する。minamo の retry 層と混同しない。
 
-自動リトライの対象は `store.append` 自体が投げたエラーのみ。`evolve` や `ExecuteObserver.onCommitted` が append 確定「後」に `ConcurrencyError` を投げた場合はリトライされず呼び出し側に伝播する（リトライすると同じイベントを二重に append するため）。したがって `ConcurrencyError` を見た呼び出し側は「コマンドが commit されなかった」とは断定できない。end user に再試行を促す前に stream を読み直すか、consumer 側の冪等キーで再実行可否を判定すること。
+自動リトライの対象は `store.append` 自体が投げたエラーのみ。`evolve` の適用は append **前**に行われる（evolve が投げれば commit 自体が起きない）一方、`ExecuteObserver.onCommitted` と snapshot save は commit 後の処理。`onCommitted` が `ConcurrencyError` を投げた場合はリトライされず呼び出し側に伝播する（リトライすると同じイベントを二重に append するため）。したがって `ConcurrencyError` を見た呼び出し側は「コマンドが commit されなかった」とは断定できない。end user に再試行を促す前に stream を読み直すか、consumer 側の冪等キーで再実行可否を判定すること。
+
+リトライは load → rehydrate → handler → append の全サイクルを回し直すため、`maxRetries` は競合したコマンドの worst-case の読み込みコストをそのまま倍増させる点に注意。
+
+---
+
+## 8. runtime 検証と DynamoDB parity
+
+組み込みの両 store は同じ入力契約を強制する。`InMemoryEventStore` のテストが `DynamoEventStore` の挙動と静かに乖離しないようにするためである:
+
+- `aggregateId` は非空文字列かつ UTF-8 で 2048 byte 以下 (DynamoDB partition key 上限)。`append` / `load` / `loadFrom` / `SnapshotStore` のいずれでも違反は `TypeError`
+- 各 event は非空の string `type` と own property の `data` が必須。違反は `EventLimitError`。不正な event が実 stream に commit されると以後の `rehydrate` が全て失敗するため、`append` は書き込み前に reject する
+- `correlationId` は指定するなら string。違反は `TypeError` (非文字列は marshall で数値化され、読み出し時に静かに消える)
+
+型レベルの制約も 2 点ある:
+
+- `EventMap` は `Record<string, unknown>`。event map は `type` alias で宣言すること。index signature を持たない `interface` は制約を**満たさない**
+- event の `data` に `undefined` を実行時に渡してはいけない。`structuredClone` は `undefined` field を保持するが DynamoDB の `marshall` は落とすため、InMemory と DynamoDB で永続化内容が食い違う。payload field は optional で宣言する (`{ activatedAt?: string }`)
+
+同じ理由で `executeCommand` は `EventStore` / `SnapshotStore` の契約を実行時に検証する (load は配列を返す、append は commit した event と同数・連番を返す、snapshot は `aggregateId` / `version` / `state` を持つ)。契約違反の custom store は stream を腐らせる代わりに `TypeError` で fail-loud する。
+
+最後に、`DynamoEventStore` は cancellation reason が `TransactionConflict` の `TransactionCanceledException` も `ConditionalCheckFailed` 同様 `ConcurrencyError` に map する。並行 transaction による同一 aggregate への同時書き込み競合は、`executeCommand` で楽観的ロック衝突と同じくリトライされる。

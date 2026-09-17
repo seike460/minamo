@@ -2,10 +2,29 @@ import type { Aggregate, AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEventsOf } from "../core/types.js";
 import { ConcurrencyError, InvalidEventStreamError, RetryExhaustedError } from "../errors.js";
 import type { AppendOptions, EventStore } from "../event-store/types.js";
+import { assertAggregateId, clip } from "../internal/guards.js";
 import type { ExecuteObserver } from "../observability.js";
 import type { Snapshot, SnapshotPolicy, SnapshotStore } from "../snapshot/types.js";
 import type { ReadonlyDeep } from "../types.js";
 import type { CommandHandler } from "./types.js";
+
+/**
+ * `config.evolve` に `type` の callable な handler が登録されているか。
+ *
+ * `Object.hasOwn` は key の存在だけを見るため `{ X: undefined }` のような登録を
+ * 通してしまい、application 側の `=== undefined → continue` が event を「永続化済み
+ * だが state には反映されない」静かな乖離にする。prototype chain 由来の名前
+ * (`toString` 等) と値の非関数性の双方をここで弾く。
+ */
+function hasEvolveHandler<TState, TMap extends EventMap>(
+  config: AggregateConfig<TState, TMap>,
+  type: string,
+): boolean {
+  return (
+    Object.hasOwn(config.evolve, type) &&
+    typeof (config.evolve as Record<string, unknown>)[type] === "function"
+  );
+}
 
 /**
  * 検証済みイベント列を baseState / baseVersion の上に replay して Aggregate を構築する内部共通関数。
@@ -52,7 +71,7 @@ function replayEvents<TState, TMap extends EventMap>(
       throw new InvalidEventStreamError(
         id,
         "aggregateId_mismatch",
-        `event at index ${i} belongs to aggregate "${raw.aggregateId}", expected "${id}"`,
+        `event at index ${i} belongs to aggregate ${clip(raw.aggregateId)}, expected ${clip(id)}`,
         { eventIndex: i, expectedAggregateId: id, actualAggregateId: raw.aggregateId },
       );
     }
@@ -97,6 +116,8 @@ function replayEvents<TState, TMap extends EventMap>(
 
     // upcast はメタデータ (aggregateId/version/timestamp) を保持する契約。保持は consumer 責務であり、
     // ここでは変換結果が evolve 可能な最小 shape を持つことのみを検証する。
+    // `data` の存在も要求する: custom store 由来のイベントに data が無いと evolve に
+    // undefined が流れ、永続化形式 (write 側は data 必須) との静かな乖離になる。
     const e = upcast === undefined ? raw : (upcast(raw) as StoredEventsOf<TMap>);
     if (e === null || typeof e !== "object" || typeof e.type !== "string") {
       throw new TypeError(
@@ -105,15 +126,18 @@ function replayEvents<TState, TMap extends EventMap>(
           : `upcast returned an invalid event at index ${i}`,
       );
     }
+    if (!Object.hasOwn(e, "data") || e.data === undefined) {
+      throw new TypeError(`event at index ${i} has no data`);
+    }
 
     // `in` 演算子は prototype chain を辿るため "toString" 等の Object.prototype メンバー名が
     // missing_evolve_handler を素通りし、prototype method が evolve として呼ばれて state を
-    // 静かに破壊する。own property に限定する。
-    if (!Object.hasOwn(config.evolve, e.type)) {
+    // 静かに破壊する。own property かつ callable に限定する (`{X: undefined}` 登録も弾く)。
+    if (!hasEvolveHandler(config, e.type)) {
       throw new InvalidEventStreamError(
         id,
         "missing_evolve_handler",
-        `no evolve handler registered for event type "${e.type}"`,
+        `no evolve handler registered for event type ${clip(e.type)}`,
         { eventIndex: i, eventType: e.type },
       );
     }
@@ -155,6 +179,10 @@ export function rehydrate<TState, TMap extends EventMap>(
   id: string,
   events: ReadonlyArray<StoredEventsOf<TMap>>,
 ): Aggregate<TState> {
+  assertAggregateId(id);
+  if (!Array.isArray(events)) {
+    throw new TypeError("events must be an array");
+  }
   return replayEvents(config, id, structuredClone(config.initialState) as TState, 0, events);
 }
 
@@ -190,7 +218,7 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
       // ConditionCheck が ConcurrencyError として検出する = fail-loud)。
       if (snapshot.aggregateId !== aggregateId) {
         throw new TypeError(
-          `SnapshotStore.load returned snapshot for "${snapshot.aggregateId}", expected "${aggregateId}"`,
+          `SnapshotStore.load returned snapshot for ${clip(snapshot.aggregateId)}, expected ${clip(aggregateId)}`,
         );
       }
       if (!Number.isInteger(snapshot.version) || snapshot.version < 1) {
@@ -205,10 +233,17 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
           `SnapshotStore.load returned snapshot missing state for "${aggregateId}"`,
         );
       }
-      const tail =
+      const loaded =
         typeof store.loadFrom === "function"
           ? await store.loadFrom(aggregateId, snapshot.version)
-          : (await store.load(aggregateId)).filter((e) => e.version > snapshot.version);
+          : await store.load(aggregateId);
+      if (!Array.isArray(loaded)) {
+        throw new TypeError("EventStore.loadFrom/load must return an array");
+      }
+      const tail =
+        typeof store.loadFrom === "function"
+          ? loaded
+          : loaded.filter((e) => e.version > snapshot.version);
       const aggregate = replayEvents(
         config,
         aggregateId,
@@ -221,6 +256,9 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
   }
 
   const events = await store.load(aggregateId);
+  if (!Array.isArray(events)) {
+    throw new TypeError("EventStore.load must return an array");
+  }
   return { aggregate: rehydrate(config, aggregateId, events), replayedCount: events.length };
 }
 
@@ -292,6 +330,10 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new RangeError(`maxRetries must be a non-negative integer, got: ${String(maxRetries)}`);
   }
+  assertAggregateId(aggregateId);
+  if (correlationId !== undefined && typeof correlationId !== "string") {
+    throw new TypeError(`correlationId must be a string (got ${typeof correlationId})`);
+  }
 
   const appendOptions: AppendOptions | undefined =
     correlationId !== undefined ? { correlationId } : undefined;
@@ -310,6 +352,12 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
 
     const decided = handler(aggregate, input);
 
+    // `{length: 0}` のような非配列・Promise (async handler の付け忘れ)・単一 event
+    // オブジェクトの返却は no-op 誤認や深い位置での生 TypeError になるため弾く。
+    if (!Array.isArray(decided)) {
+      throw new TypeError("handler must return an array of events");
+    }
+
     if (decided.length === 0) {
       return { aggregate, newEvents: [] };
     }
@@ -319,21 +367,47 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     // する。`in` ではなく hasOwn を使い、Object.prototype 由来の名前 (toString 等) も確実に弾く。
     for (let i = 0; i < decided.length; i++) {
       const d = decided[i];
-      if (d === null || typeof d !== "object" || typeof d.type !== "string") {
+      if (
+        d === null ||
+        typeof d !== "object" ||
+        typeof d.type !== "string" ||
+        d.type.length === 0
+      ) {
         throw new TypeError(`handler returned an invalid event at index ${i}`);
       }
-      if (!Object.hasOwn(config.evolve, d.type)) {
+      // `data: undefined` も弾く: removeUndefinedValues で Dynamo 側は属性ごと消え、
+      // InMemory 側は保持される = backend 間で永続化内容が食い違う (痛み C)。
+      if (!Object.hasOwn(d, "data") || d.data === undefined) {
+        throw new TypeError(`handler returned event at index ${i} without data`);
+      }
+      if (!hasEvolveHandler(config, d.type)) {
         throw new InvalidEventStreamError(
           aggregateId,
           "missing_evolve_handler",
-          `handler returned event type "${d.type}" which has no evolve handler`,
+          `handler returned event type ${clip(d.type)} which has no evolve handler`,
           { eventIndex: i, eventType: d.type },
         );
       }
     }
 
+    // evolve の適用と state clone は append 前に行う。commit 後に structuredClone / evolve が
+    // throw すると「イベントは永続化済みなのに呼び出し側には失敗に見える」状態になり、
+    // caller の再実行が二重 append を招く (DEC-026 と同型の hazard)。
+    // decided は直前に shape + evolve 登録を検証済みのため、ここでは純粋に state を畳む。
+    let updatedState = structuredClone(aggregate.state) as TState;
+    for (const d of decided) {
+      const evolveHandler = config.evolve[d.type as keyof TMap & string];
+      // evolve には data の clone を渡す: 不純な evolve が payload を mutate しても
+      // 永続化される `decided` に波及しない (DEC-011 は consumer 契約だが、pre-append
+      // 化により mutate の被害範囲が「返り値」から「永続化データ」に拡大したため防御)。
+      updatedState = evolveHandler(
+        updatedState as ReadonlyDeep<TState>,
+        structuredClone(d.data) as ReadonlyDeep<TMap[keyof TMap & string]>,
+      );
+    }
+
     // retry の発火条件は append の ConcurrencyError のみ (concept.md §5.6)。commit 後処理
-    // (evolve 再適用 / onCommitted / snapshot save) をこの catch の射程に入れると、それらが
+    // (onCommitted / snapshot save) をこの catch の射程に入れると、それらが
     // ConcurrencyError を投げた際に commit 済み append を再試行して二重書き込みになる
     // (DEC-026 と同型の hazard)。try は append 呼び出しに限定する。
     let newEvents: ReadonlyArray<StoredEventsOf<TMap>>;
@@ -352,35 +426,47 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       throw err;
     }
 
-    let updatedState = structuredClone(aggregate.state) as TState;
-    for (const e of newEvents) {
-      // append の返り値が decided と異なる type を含む custom store の契約違反でも、
-      // prototype chain 由来のメソッド (toString 等) を evolve として呼ばない。
-      const evolveHandler = Object.hasOwn(config.evolve, e.type)
-        ? config.evolve[e.type as keyof TMap & string]
-        : undefined;
-      if (evolveHandler === undefined) continue;
-      updatedState = evolveHandler(
-        updatedState as ReadonlyDeep<TState>,
-        e.data as ReadonlyDeep<TMap[keyof TMap & string]>,
+    // EventStore contract の postcondition (件数一致・連番・aggregateId 一致) を検証する。
+    // custom store の契約違反を握ると返す aggregate.version / snapshot.version が静かに腐る
+    // (SnapshotStore.load の envelope 検証と同じ fail-loud 方針)。
+    if (!Array.isArray(newEvents) || newEvents.length !== decided.length) {
+      throw new TypeError(
+        `EventStore.append must return ${decided.length} stored event(s), got ${
+          Array.isArray(newEvents) ? newEvents.length : typeof newEvents
+        }`,
       );
+    }
+    for (let i = 0; i < newEvents.length; i++) {
+      const e = newEvents[i];
+      if (
+        e === null ||
+        typeof e !== "object" ||
+        e.aggregateId !== aggregateId ||
+        e.version !== aggregate.version + i + 1
+      ) {
+        throw new TypeError(`EventStore.append returned an invalid stored event at index ${i}`);
+      }
     }
     const version = aggregate.version + newEvents.length;
     observer?.onCommitted?.({ aggregateId, newEventCount: newEvents.length, version });
 
     if (snapshotStore !== undefined && shouldSnapshot(snapshotPolicy, aggregate.version, version)) {
-      const snapshot: Snapshot<TState> = {
-        aggregateId,
-        version,
-        state: updatedState,
-        timestamp: new Date().toISOString(),
-      };
       // snapshot save は best-effort (DEC-026): append は既に commit 済みのため、save 失敗で
       // command 全体を reject すると、呼び出し側が「失敗」とみなして再実行し二重書き込みを招く。
       // snapshot は rehydration の最適化であり、save が失敗しても次回は前回 snapshot か full replay
-      // で正答する。framework-free を保つため log もしない（可観測性 hook は public surface を
+      // で正答する。framework-free を保つため log もしない（可覚測性 hook は public surface を
       // 拡大するため別途扱い）。
+      // clone も try の内側: 非 cloneable な state (DEC-011 違反) での DataCloneError も
+      // post-commit の失敗に見せない。
       try {
+        const snapshot: Snapshot<TState> = {
+          aggregateId,
+          version,
+          // caller へ返す aggregate.state と共有しない (custom SnapshotStore が参照を
+          // 保持する場合に、caller 側の mutation が保存済み snapshot に波及しないように)。
+          state: structuredClone(updatedState) as TState,
+          timestamp: new Date().toISOString(),
+        };
         await snapshotStore.save(snapshot);
       } catch {
         // best-effort: swallow（上記コメントの理由により command の成功を妨げない）

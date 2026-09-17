@@ -47,27 +47,41 @@ export function toItem(stored: StoredEvent<string, unknown>): EventItem {
  * 余分な attribute は無視する (future-compat)。
  */
 export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unknown> {
-  if (typeof raw.aggregateId !== "string") {
+  // `Object.hasOwn` + 型検査の両方を行う: `@aws-sdk/util-dynamodb` の unmarshall は
+  // `"__proto__"` キーを持つ item を受けると返り値 object の [[Prototype]] を汚染する
+  // (acc[key]= の変異が __proto__ setter を踏む)。typeof 検査だけだと prototype 経由で
+  // 供給された偽装 field を受理してしまうため、own property であることを必須にする。
+  if (!Object.hasOwn(raw, "aggregateId") || typeof raw.aggregateId !== "string") {
     throw new TypeError(`DynamoDB item missing string aggregateId (got ${typeof raw.aggregateId})`);
   }
-  if (typeof raw.version !== "number") {
+  if (!Object.hasOwn(raw, "version") || typeof raw.version !== "number") {
     throw new TypeError(`DynamoDB item missing numeric version (got ${typeof raw.version})`);
   }
-  if (typeof raw.type !== "string") {
+  if (!Number.isInteger(raw.version) || raw.version < 1) {
+    throw new TypeError(`DynamoDB item has invalid version (got ${String(raw.version)})`);
+  }
+  if (!Object.hasOwn(raw, "type") || typeof raw.type !== "string") {
     throw new TypeError(`DynamoDB item missing string type (got ${typeof raw.type})`);
   }
-  if (typeof raw.timestamp !== "string") {
+  if (!Object.hasOwn(raw, "timestamp") || typeof raw.timestamp !== "string") {
     throw new TypeError(`DynamoDB item missing string timestamp (got ${typeof raw.timestamp})`);
+  }
+  if (!Object.hasOwn(raw, "data") || raw.data === undefined) {
+    throw new TypeError("DynamoDB item missing data attribute");
   }
 
   const base = {
     aggregateId: raw.aggregateId,
     version: raw.version,
     type: raw.type,
-    data: raw.data,
+    // structuredClone で深層まで [[Prototype]] を正規化する (unmarshall 産物はネストした
+    // map 内の __proto__ キーでも汚染されうる)。own enumerable な値は全て保持される。
+    data: structuredClone(raw.data),
     timestamp: raw.timestamp,
   };
-  return raw.correlationId !== undefined && typeof raw.correlationId === "string"
+  // correlationId も own property を要求する: 汚染された [[Prototype]] 経由の
+  // 値を stored event に載せない (値 injection 防止)。
+  return Object.hasOwn(raw, "correlationId") && typeof raw.correlationId === "string"
     ? { ...base, correlationId: raw.correlationId }
     : base;
 }

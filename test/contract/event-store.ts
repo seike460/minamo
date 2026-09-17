@@ -3,7 +3,7 @@ import type { EventMap, EventStore } from "../../src/index.js";
 import { ConcurrencyError, EventLimitError } from "../../src/index.js";
 
 /**
- * Event Store Contract Tests (CT-01 〜 CT-16)。
+ * Event Store Contract Tests (CT-01 〜 CT-20)。
  *
  * 単一 suite を InMemoryEventStore と DynamoEventStore の両方で実行し、
  * concept.md §1 痛み C (InMemory と本番の振る舞い差異) を構造的に抑え込む。
@@ -249,5 +249,67 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
         ).rejects.toBeInstanceOf(EventLimitError);
       });
     }
+
+    it("CT-17 malformed event envelope → EventLimitError (append は直接呼ばれうる)", async () => {
+      const store = await makeStore();
+      const malformed = [
+        { data: { amount: 1 } }, // type 欠落
+        { type: "Incremented" }, // data 欠落
+        { type: "Incremented", data: undefined }, // data undefined (marshall で属性ごと消失する)
+        { type: "", data: { amount: 1 } }, // 空 type
+        { type: 42, data: { amount: 1 } }, // 非 string type
+        null, // 非 object 要素
+        "Incremented", // 非 object 要素
+      ];
+      for (const [i, bad] of malformed.entries()) {
+        await expect(store.append(`agg-17-${i}`, [bad as never], 0)).rejects.toBeInstanceOf(
+          EventLimitError,
+        );
+      }
+      // reject された append は何も永続化していないこと
+      expect(await store.load("agg-17-0")).toEqual([]);
+    });
+
+    it("CT-18 invalid aggregateId → TypeError (append / load / loadFrom 共通)", async () => {
+      const store = await makeStore();
+      await expect(
+        store.append("", [{ type: "Incremented", data: { amount: 1 } }], 0),
+      ).rejects.toBeInstanceOf(TypeError);
+      await expect(
+        // 2048 byte の DynamoDB partition key 上限超過
+        store.append("x".repeat(2049), [{ type: "Incremented", data: { amount: 1 } }], 0),
+      ).rejects.toBeInstanceOf(TypeError);
+      await expect(store.load("")).rejects.toBeInstanceOf(TypeError);
+      expect(store.loadFrom).toBeTypeOf("function");
+      if (typeof store.loadFrom === "function") {
+        await expect(store.loadFrom("", 0)).rejects.toBeInstanceOf(TypeError);
+        // afterVersion の非整数・負数も backend 非依存に TypeError で弾く
+        // (InMemory は version > NaN で静かに [] になりうるため契約として固定する)
+        await expect(store.loadFrom("agg-18", 1.5)).rejects.toBeInstanceOf(TypeError);
+        await expect(store.loadFrom("agg-18", -1)).rejects.toBeInstanceOf(TypeError);
+        await expect(store.loadFrom("agg-18", Number.NaN)).rejects.toBeInstanceOf(TypeError);
+      }
+    });
+
+    it("CT-19 non-string correlationId → TypeError", async () => {
+      const store = await makeStore();
+      await expect(
+        store.append("agg-19", [{ type: "Incremented", data: { amount: 1 } }], 0, {
+          correlationId: 42 as unknown as string,
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(await store.load("agg-19")).toEqual([]);
+    });
+
+    it("CT-20 append の返り値は入力 event と参照を共有しない", async () => {
+      const store = await makeStore();
+      const aggregateId = "agg-20";
+      const data = { amount: 5 };
+      const appended = await store.append(aggregateId, [{ type: "Incremented", data }], 0);
+      // 返り値を改変しても永続化内容・caller の入力オブジェクトの双方に波及しないこと
+      (appended[0]?.data as { amount: number }).amount = -1;
+      expect(data.amount).toBe(5);
+      expect((await store.load(aggregateId))[0]?.data).toEqual({ amount: 5 });
+    });
   });
 }

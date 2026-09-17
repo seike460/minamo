@@ -1,6 +1,12 @@
 import type { DynamoDBDocumentClient, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import type { EventMap, EventsOf, StoredEvent, StoredEventsOf } from "../../core/types.js";
 import { ConcurrencyError, EventLimitError } from "../../errors.js";
+import {
+  assertAfterVersion,
+  assertAggregateId,
+  assertAppendOptions,
+  assertDomainEvents,
+} from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { AppendOptions, EventStore } from "../types.js";
 import { type DynamoEventStoreConfig, resolveDocumentClient } from "./client.js";
@@ -82,9 +88,12 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
         `expectedVersion must be a non-negative integer (got ${String(expectedVersion)})`,
       );
     }
+    assertAggregateId(aggregateId);
+    assertAppendOptions(aggregateId, options);
     if (events.length === 0) {
       throw new EventLimitError(aggregateId, "events must not be empty");
     }
+    assertDomainEvents(aggregateId, events);
     if (events.length > MAX_EVENTS_PER_APPEND) {
       throw new EventLimitError(
         aggregateId,
@@ -111,7 +120,9 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       const event = stored[i];
       if (event === undefined) continue;
       const itemSize = approxItemSize(event);
-      if (itemSize > MAX_ITEM_SIZE_BYTES) {
+      // 4MB transaction チェックと同じく slack を引く: approxItemSize は JSON byte 近似で、
+      // attribute name 等の実オーバーヘッドを含まない。境界値の false-accept を防ぐ。
+      if (itemSize + SIZE_SLACK_BYTES > MAX_ITEM_SIZE_BYTES) {
         throw new EventLimitError(
           aggregateId,
           `event at index ${i} exceeds 400KB item size limit (approx ${itemSize} bytes)`,
@@ -125,6 +136,12 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
         `aggregated size exceeds 4MB transaction limit (approx ${totalSize} bytes)`,
       );
     }
+
+    // 返り値用の clone は send 前に作る: `stored` は入力 `events[i].data` と参照を共有
+    // するため返り値の隔離が必要だが、commit 後に structuredClone が投げると
+    // 「書き込み済みなのに失敗に見える」状態になる (二重 append hazard)。
+    // clone 不可能な data (関数値等、DEC-011 違反) はここで pre-commit に失敗する。
+    const out = structuredClone(stored) as ReadonlyArray<StoredEventsOf<TMap>>;
 
     const transactItems: TransactWriteCommand["input"]["TransactItems"] = stored.map((e) => ({
       Put: {
@@ -159,19 +176,26 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       const reasons = (
         err as { CancellationReasons?: ReadonlyArray<{ Code?: string }> } | undefined
       )?.CancellationReasons;
+      // ConditionalCheckFailed: expectedVersion の楽観的ロック違反。
+      // TransactionConflict: 同一 item への並行 transaction との衝突。全 TransactItem が
+      // 単一 aggregate のキーを指すため、これは同一 stream への同時書き込み競合を意味し、
+      // transaction は rollback 済みなので retry して安全 (ConcurrencyError と同じ扱い)。
       if (
         isTransactionCanceledException(err) &&
-        reasons?.some((r) => r.Code === "ConditionalCheckFailed")
+        reasons?.some(
+          (r) => r.Code === "ConditionalCheckFailed" || r.Code === "TransactionConflict",
+        )
       ) {
         throw new ConcurrencyError(aggregateId, expectedVersion);
       }
       throw err;
     }
 
-    return stored as ReadonlyArray<StoredEventsOf<TMap>>;
+    return out;
   }
 
   async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
     return this.#query("aggregateId = :id", { ":id": aggregateId });
   }
 
@@ -183,6 +207,8 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
     aggregateId: string,
     afterVersion: number,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>> {
+    assertAggregateId(aggregateId);
+    assertAfterVersion(afterVersion);
     return this.#query("aggregateId = :id AND version > :v", {
       ":id": aggregateId,
       ":v": afterVersion,

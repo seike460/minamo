@@ -1,5 +1,6 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { assertAggregateId, assertSnapshot } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { Snapshot, SnapshotStore } from "../../snapshot/types.js";
 import { resolveDocumentClient } from "./client.js";
@@ -19,28 +20,34 @@ function libDynamodb(): typeof import("@aws-sdk/lib-dynamodb") {
  * `data` と同方針）。余分な attribute は無視する。
  */
 function fromSnapshotItem<TState>(item: Record<string, unknown>): Snapshot<TState> {
-  if (typeof item.aggregateId !== "string") {
+  // `fromItem` (marshaller.ts) と同じく `Object.hasOwn` + 型検査を併用する:
+  // unmarshall の __proto__ 汚染で prototype 経由に供給された偽装 field を弾く。
+  if (!Object.hasOwn(item, "aggregateId") || typeof item.aggregateId !== "string") {
     throw new TypeError(
       `DynamoDB snapshot item missing string aggregateId (got ${typeof item.aggregateId})`,
     );
   }
-  if (typeof item.version !== "number") {
+  if (!Object.hasOwn(item, "version") || typeof item.version !== "number") {
     throw new TypeError(
       `DynamoDB snapshot item missing numeric version (got ${typeof item.version})`,
     );
   }
-  if (typeof item.timestamp !== "string") {
+  if (!Number.isInteger(item.version) || item.version < 1) {
+    throw new TypeError(`DynamoDB snapshot item has invalid version (got ${String(item.version)})`);
+  }
+  if (!Object.hasOwn(item, "timestamp") || typeof item.timestamp !== "string") {
     throw new TypeError(
       `DynamoDB snapshot item missing string timestamp (got ${typeof item.timestamp})`,
     );
   }
-  if (!Object.hasOwn(item, "state")) {
+  if (!Object.hasOwn(item, "state") || item.state === undefined) {
     throw new TypeError("DynamoDB snapshot item missing state attribute");
   }
   return {
     aggregateId: item.aggregateId,
     version: item.version,
-    state: item.state as TState,
+    // unmarshall 産物のネスト map は __proto__ 汚染されうるため clone で正規化する。
+    state: structuredClone(item.state) as TState,
     timestamp: item.timestamp,
   };
 }
@@ -81,6 +88,7 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   }
 
   async load(aggregateId: string): Promise<Snapshot<TState> | null> {
+    assertAggregateId(aggregateId);
     const { GetCommand } = libDynamodb();
     const result = await this.#doc.send(
       new GetCommand({
@@ -94,6 +102,7 @@ export class DynamoSnapshotStore<TState> implements SnapshotStore<TState> {
   }
 
   async save(snapshot: Snapshot<TState>): Promise<void> {
+    assertSnapshot(snapshot);
     const { PutCommand } = libDynamodb();
     await this.#doc.send(
       new PutCommand({

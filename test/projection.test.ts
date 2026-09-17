@@ -9,6 +9,7 @@ import {
   insertWithoutNewImage,
   modifyRecord,
   removeRecord,
+  type StreamRecordFixture,
 } from "./fixtures/stream-records.js";
 
 const acceptedNames: ReadonlyArray<keyof CounterEvents & string> = ["Incremented"];
@@ -141,6 +142,69 @@ describe("parseStreamRecord", () => {
     } catch (err) {
       const e = err as InvalidStreamRecordError;
       expect(e.reason).toBe("unmarshal_failed");
+    }
+  });
+
+  it("CT-PB-13 throws missing_field when version is not an integer >= 1", () => {
+    // NaN は DynamoDB number として表現不能 (marshall が拒否) なため stream 経由では
+    // 到達しない。非整数・0 のみ検証する (NaN は typeof 検査側で弾かれる)。
+    for (const version of [1.5, 0, -2]) {
+      const bad = insertRecord({
+        aggregateId: "agg-1",
+        version,
+        type: "Incremented",
+        data: { amount: 1 },
+        timestamp: "2026-04-17T00:00:00.000Z",
+      });
+      try {
+        parseStreamRecord<CounterEvents>(bad, acceptedNames);
+        expect.fail(`expected throw for version=${String(version)}`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(InvalidStreamRecordError);
+        expect((err as InvalidStreamRecordError).reason).toBe("missing_field");
+      }
+    }
+  });
+
+  it("CT-PB-14 throws missing_field when data attribute is absent", () => {
+    const bad = insertRecord({
+      aggregateId: "agg-1",
+      version: 1,
+      type: "Incremented",
+      timestamp: "2026-04-17T00:00:00.000Z",
+    });
+    try {
+      parseStreamRecord<CounterEvents>(bad, acceptedNames);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidStreamRecordError);
+      expect((err as InvalidStreamRecordError).reason).toBe("missing_field");
+      expect((err as InvalidStreamRecordError).detail).toBe("data");
+    }
+  });
+
+  it("CT-PB-15 throws missing_field when a required field is only reachable via a polluted prototype", () => {
+    // unmarshall は `"__proto__"` キーを持つ Map で結果 object の [[Prototype]] を
+    // 汚染する。version を own property として持たず __proto__ Map 経由で偽装する
+    // record を再現する (computed key は own property "__proto__" を作る)。
+    const forged: StreamRecordFixture = {
+      eventName: "INSERT",
+      dynamodb: {
+        NewImage: {
+          aggregateId: { S: "agg-1" },
+          type: { S: "Incremented" },
+          timestamp: { S: "2026-04-17T00:00:00.000Z" },
+          data: { M: { amount: { N: "5" } } },
+          ["__proto__"]: { M: { version: { N: "1" } } },
+        },
+      },
+    };
+    try {
+      parseStreamRecord<CounterEvents>(forged, acceptedNames);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidStreamRecordError);
+      expect((err as InvalidStreamRecordError).reason).toBe("missing_field");
     }
   });
 

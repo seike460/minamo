@@ -1,3 +1,4 @@
+import { assertAggregateId, assertSnapshot } from "../internal/guards.js";
 import type { Snapshot, SnapshotStore } from "./types.js";
 
 /**
@@ -15,11 +16,13 @@ export class InMemorySnapshotStore<TState> implements SnapshotStore<TState> {
   readonly #snapshots: Map<string, Snapshot<TState>> = new Map();
 
   async load(aggregateId: string): Promise<Snapshot<TState> | null> {
+    assertAggregateId(aggregateId);
     const snapshot = this.#snapshots.get(aggregateId);
     return snapshot === undefined ? null : (structuredClone(snapshot) as Snapshot<TState>);
   }
 
   async save(snapshot: Snapshot<TState>): Promise<void> {
+    assertSnapshot(snapshot);
     this.#snapshots.set(snapshot.aggregateId, structuredClone(snapshot) as Snapshot<TState>);
   }
 

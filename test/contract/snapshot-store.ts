@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { SnapshotStore } from "../../src/index.js";
 
 /**
- * SnapshotStore Contract Tests (CT-SS-01〜05)。
+ * SnapshotStore Contract Tests (CT-SS-01〜07)。
  *
  * 単一 suite を InMemorySnapshotStore と DynamoSnapshotStore の両方で実行し、
  * snapshot の save/load 振る舞い一致を構造的に保証する (DEC-019)。
@@ -107,6 +107,36 @@ export function registerSnapshotStoreContract(ctx: SnapshotContractContext): voi
       // 返り値は live object と切り離されている (mutation が store に波及しない)
       if (loaded) loaded.state.tags.push("mutated");
       expect((await store.load("ss-05"))?.state.tags).toEqual(["x", "y", "z"]);
+    });
+
+    it("CT-SS-06 save rejects malformed snapshot envelopes (write-side validation)", async () => {
+      const store = await makeStore();
+      const base = {
+        aggregateId: "ss-06",
+        version: 1,
+        state: { count: 1, tags: [] },
+        timestamp: "2026-01-01T00:00:00.000Z",
+      };
+      // load 側で弾ける shape を書き込ませない (書いた snapshot は二度と読めない)
+      const malformed = [
+        { ...base, aggregateId: "" },
+        { ...base, version: 0 },
+        { ...base, version: 1.5 },
+        { ...base, version: Number.NaN },
+        { ...base, state: undefined },
+        { aggregateId: "ss-06", version: 1, timestamp: base.timestamp }, // state 欠落
+        { aggregateId: "ss-06", version: 1, state: base.state }, // timestamp 欠落
+      ];
+      for (const bad of malformed) {
+        await expect(store.save(bad as never)).rejects.toBeInstanceOf(TypeError);
+      }
+      // reject された save は何も永続化していないこと
+      expect(await store.load("ss-06")).toBeNull();
+    });
+
+    it("CT-SS-07 load rejects invalid aggregateId", async () => {
+      const store = await makeStore();
+      await expect(store.load("")).rejects.toBeInstanceOf(TypeError);
     });
   });
 }

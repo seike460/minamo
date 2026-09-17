@@ -1,6 +1,7 @@
 import type { AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEvent } from "../core/types.js";
 import { InvalidStreamRecordError } from "../errors.js";
+import { clip } from "../internal/guards.js";
 import { requirePeer } from "../internal/require-peer.js";
 
 /** `parseStreamRecord` の optional な挙動切替。 */
@@ -20,7 +21,10 @@ export interface ParseStreamRecordOptions {
  * - `dynamodb.NewImage` が無い場合は `InvalidStreamRecordError(missing_field, "dynamodb.NewImage")`
  * - `unmarshall` (`@aws-sdk/util-dynamodb`) で AttributeValue → plain JS に変換
  *   - 失敗時は `InvalidStreamRecordError(unmarshal_failed, ...)`
- * - 必須 field (aggregateId / version / type / timestamp) の型違反は `missing_field`
+ *   - unmarshall は `"__proto__"` キーを持つ Map で [[Prototype]] を汚染するため、
+ *     必須 field は `Object.hasOwn` で検査し、`data` は `structuredClone` で正規化する
+ * - 必須 field (aggregateId / version / type / timestamp / data) の型違反は `missing_field`
+ * - `version` は整数かつ >= 1 を要求 (不正な値は `missing_field`)
  * - `eventNames` に含まれない type は strict mode で `unknown_type`、lenient mode で `null`
  * - `correlationId` が string として存在する場合のみ stored に付与 (DEC-011)
  *
@@ -69,40 +73,55 @@ export function parseStreamRecord<
     );
   }
 
-  if (typeof item.aggregateId !== "string") {
+  // `Object.hasOwn` + 型検査の併用: unmarshall が汚染した [[Prototype]] 経由で
+  // 供給された偽装 field (item.__proto__.version 等) を typeof 検査が通してしまう
+  // ことを防ぐ。own property でない必須 field は存在しないものとして扱う。
+  if (!Object.hasOwn(item, "aggregateId") || typeof item.aggregateId !== "string") {
     throw new InvalidStreamRecordError(
       "missing_field",
       "aggregateId must be a string",
       "aggregateId",
     );
   }
-  if (typeof item.version !== "number") {
+  if (!Object.hasOwn(item, "version") || typeof item.version !== "number") {
     throw new InvalidStreamRecordError("missing_field", "version must be a number", "version");
   }
-  if (typeof item.type !== "string") {
+  if (!Number.isInteger(item.version) || item.version < 1) {
+    throw new InvalidStreamRecordError(
+      "missing_field",
+      `version must be an integer >= 1 (got ${String(item.version)})`,
+      "version",
+    );
+  }
+  if (!Object.hasOwn(item, "type") || typeof item.type !== "string") {
     throw new InvalidStreamRecordError("missing_field", "type must be a string", "type");
   }
-  if (typeof item.timestamp !== "string") {
+  if (!Object.hasOwn(item, "timestamp") || typeof item.timestamp !== "string") {
     throw new InvalidStreamRecordError("missing_field", "timestamp must be a string", "timestamp");
+  }
+  if (!Object.hasOwn(item, "data") || item.data === undefined) {
+    throw new InvalidStreamRecordError("missing_field", "data attribute is required", "data");
   }
 
   if (!(eventNames as ReadonlyArray<string>).includes(item.type)) {
     if (options?.ignoreUnknownTypes === true) return null;
     throw new InvalidStreamRecordError(
       "unknown_type",
-      `Event type "${item.type}" is not in the accepted event names`,
+      `Event type ${clip(item.type)} is not in the accepted event names`,
       item.type,
     );
   }
 
   const base = {
     type: item.type as TEventName,
-    data: item.data as unknown,
+    // unmarshall 産物はネスト map の __proto__ キーで汚染されうるため clone で正規化する。
+    data: structuredClone(item.data) as unknown,
     aggregateId: item.aggregateId,
     version: item.version,
     timestamp: item.timestamp,
   };
-  return typeof item.correlationId === "string"
+  // correlationId も own property のみ採用する (汚染 prototype 経由の値 injection を防ぐ)。
+  return Object.hasOwn(item, "correlationId") && typeof item.correlationId === "string"
     ? { ...base, correlationId: item.correlationId }
     : base;
 }

@@ -86,4 +86,20 @@ describe("DynamoEventStore pre-flight", () => {
     });
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("rejects non-cloneable data before send (no post-commit DataCloneError)", async () => {
+    const { store, send } = counterStore();
+    // ネストに structuredClone を通せない関数値を含む data: commit 後に clone が
+    // throw すると「書き込み済みなのに失敗に見える」状態になるため、send 前に
+    // DataCloneError で失敗しなければならない (envelope 検査は top-level の data のみ
+    // 見るため、ネストの関数値は clone の段階で検出される)
+    await expect(
+      store.append(
+        "agg-1",
+        [{ type: "Incremented", data: { amount: 1, fn: () => 1 } as never }],
+        0,
+      ),
+    ).rejects.toThrow();
+    expect(send).not.toHaveBeenCalled();
+  });
 });
