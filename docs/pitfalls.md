@@ -162,6 +162,8 @@ Both built-in stores enforce the same input contract, so an `InMemoryEventStore`
 - every event needs a non-empty string `type` and an own `data` property — `EventLimitError` otherwise. A malformed event committed to a real stream would poison every future `rehydrate`, so `append` rejects it before any write
 - `correlationId`, when provided, must be a string — `TypeError` otherwise (a non-string would marshall as a number and silently vanish on read)
 
+Every object-shaped parameter — `config`, `config.evolve`, `options`, `observer`, `snapshotPolicy`, `createCommandRunner`'s `deps`/`defaults`, `run()` args, and the `client`/`clientConfig` pair — must be a plain record. `null`, arrays, functions and primitives are rejected with `TypeError` at the boundary (in `createCommandRunner`'s case, at factory creation), because an absent or mistyped optional object would otherwise be silently ignored (`options?.correlationId` collapsing to `undefined`) rather than failing loudly.
+
 Event `data` and snapshot `state` must additionally be *plain data* (DEC-011) — the set of values that round-trip identically through `structuredClone` and DynamoDB marshall/unmarshall. `append` and `SnapshotStore.save` validate this recursively and reject with `TypeError`:
 
 - rejected: `undefined` values (nested included), functions, symbols, non-finite numbers (`NaN`/`Infinity`), `bigint`, `Map`, `Set`, `Date`, `RegExp`, class instances, `ArrayBuffer`/views other than `Uint8Array` (including `Buffer` and `Uint8Array` subclasses — unmarshall always returns a plain `Uint8Array`), circular references, own `__proto__` keys, enumerable symbol keys, and nesting deeper than 32 levels (DynamoDB's limit)

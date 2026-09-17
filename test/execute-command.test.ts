@@ -684,6 +684,12 @@ describe("executeCommand", () => {
     expect(store.appendCalls).toBe(0);
   });
 
+  it("CT-EC-34b params 自体が非 object → TypeError (destructure の生 TypeError を防ぐ)", async () => {
+    for (const bad of [null, 42, "params", []]) {
+      await expect(executeCommand(bad as never)).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
   it("CT-EC-35 malformed 依存 (handler / store / observer / snapshotStore / snapshotPolicy) → TypeError", async () => {
     const store = new CountingStore<CounterEvents>(new InMemoryEventStore<CounterEvents>());
     const base = {

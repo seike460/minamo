@@ -162,6 +162,8 @@ SDK の transient error に対するリトライが必要なら、`DynamoEventSt
 - 各 event は非空の string `type` と own property の `data` が必須。違反は `EventLimitError`。不正な event が実 stream に commit されると以後の `rehydrate` が全て失敗するため、`append` は書き込み前に reject する
 - `correlationId` は指定するなら string。違反は `TypeError` (非文字列は marshall で数値化され、読み出し時に静かに消える)
 
+object 形状の引数 — `config`、`config.evolve`、`options`、`observer`、`snapshotPolicy`、`createCommandRunner` の `deps`/`defaults`、`run()` の引数、`client`/`clientConfig` — はいずれも record (plain object 相当) が必須。`null`・配列・関数・primitive は境界で `TypeError` として reject される (`createCommandRunner` は factory 生成時点)。誤った optional object は `options?.correlationId` が `undefined` に揃うように、fail-loud ではなく静かに無視されてしまうためである。
+
 さらに event の `data` と snapshot の `state` は *plain data* (DEC-011) である必要がある — `structuredClone` と DynamoDB marshall/unmarshall の両方で同一に round-trip する値の集合。`append` と `SnapshotStore.save` はこれを再帰的に検証し、違反は `TypeError` で reject する:
 
 - 拒否: `undefined` 値 (ネスト内を含む)、関数、symbol、非有限数 (`NaN`/`Infinity`)、`bigint`、`Map`、`Set`、`Date`、`RegExp`、class instance、`Uint8Array` 以外の `ArrayBuffer`/view (`Buffer` や `Uint8Array` subclass を含む — unmarshall は常に素の `Uint8Array` を返す)、循環参照、own `__proto__` key、enumerable symbol key、32 階層を超えるネスト (DynamoDB の上限)

@@ -377,6 +377,10 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
   /** append で追加された server-assigned metadata 付きの StoredEvent 列。no-op 時は `[]`。 */
   newEvents: ReadonlyArray<StoredEventsOf<TMap>>;
 }> {
+  // params 自体が非 object だと destructure の生 TypeError になるため入口で弾く。
+  if (!isObjectRecord(params)) {
+    throw new TypeError("params must be an object");
+  }
   const {
     config,
     store,
