@@ -4,12 +4,12 @@ minamo は 1 人メンテナンス (`@seike460`) の OSS ライブラリで、pr
 
 ## Supported Versions
 
-v0.x は開発中であり、**最新 minor のみ** セキュリティ修正を受けます。`0.1.0` 以前は public release が存在しないため対象外です。
+v0.x は開発中であり、**最新 minor のみ** セキュリティ修正を受けます。最初の public release は `0.2.0` です。
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1.0 | :x:                |
+| 0.2.x   | :white_check_mark: |
+| < 0.2.0 | :x:                |
 
 ## Reporting a Vulnerability
 

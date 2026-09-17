@@ -27,7 +27,7 @@
     "url": "https://github.com/seike460/minamo/issues"
   },
   "type": "module",
-  "packageManager": "pnpm@10.13.1",
+  "packageManager": "pnpm@10.34.5",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
