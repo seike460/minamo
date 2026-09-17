@@ -12,8 +12,12 @@ export interface EventStoreTable {
    * 指定した `TMap` に narrow された `DynamoEventStore<TMap>` を返す。
    * heterogeneous union ではなく単一 Aggregate のストアを返すため、`rehydrate` が依存する
    * 単一ストリーム不変条件と per-Aggregate `TMap` narrowing が保たれる。
+   *
+   * 必ず `table.for<OrderEvents>()` のように型引数を明示すること。省略時の default は
+   * `never` で、`append` が `never` の event しか受け付けない store になり
+   * compile 時に fail する (silent な narrowing 喪失を防ぐ)。
    */
-  for<TMap extends EventMap>(): DynamoEventStore<TMap>;
+  for<TMap extends EventMap = never>(): DynamoEventStore<TMap>;
 }
 
 /**

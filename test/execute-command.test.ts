@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   ConcurrencyError,
+  EventLimitError,
   executeCommand,
   InMemoryEventStore,
   InvalidEventStreamError,
   RetryExhaustedError,
 } from "../src/index.js";
-import { AlwaysFail, CountingStore, FailOnce } from "./doubles/event-store-doubles.js";
+import {
+  AlwaysFail,
+  CountingStore,
+  FailOnce,
+  FailOnceAndAdvance,
+} from "./doubles/event-store-doubles.js";
 import { type CounterEvents, counterConfig, incrementHandler } from "./fixtures/counter.js";
 
 describe("executeCommand", () => {
@@ -422,6 +428,168 @@ describe("executeCommand", () => {
         input: { amount: 1 },
       }),
     ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("CT-EC-26 retry は stream を再読込し、競合分を含む state と進んだ expectedVersion で append する", async () => {
+    // FailOnceAndAdvance: 1 回目の append で他者の書き込み (amount: 10) を commit
+    // してから衝突を返す。再 load を省いた退化実装では 2 回目の handler が
+    // state=0 / expectedVersion=0 を観測するため検出できる。
+    const store = new FailOnceAndAdvance<CounterEvents>([
+      { type: "Incremented", data: { amount: 10 } },
+    ]);
+    const observedStates: number[] = [];
+    const res = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: (agg, input: { amount: number }) => {
+        observedStates.push(agg.state);
+        return incrementHandler(agg, input);
+      },
+      aggregateId: "agg-1",
+      input: { amount: 5 },
+      maxRetries: 3,
+    });
+    expect(store.loadCalls).toBe(2); // 各試行で再 load する
+    expect(observedStates).toEqual([0, 10]); // 2 回目は競合イベント込みの state
+    expect(store.seenExpectedVersions).toEqual([0, 1]); // 進んだ expectedVersion
+    expect(res.aggregate.state).toBe(15);
+    expect(res.aggregate.version).toBe(2);
+    // 永続化結果: 競合分 + decided 分で 2 件
+    expect(await store.inner.load("agg-1")).toHaveLength(2);
+  });
+
+  it("CT-EC-27 append が ConcurrencyError 以外を投げる → retry せずそのまま伝播", async () => {
+    const inner = new InMemoryEventStore<CounterEvents>();
+    let appendCalls = 0;
+    const store = {
+      load: (id: string) => inner.load(id),
+      append: () => {
+        appendCalls += 1;
+        throw new EventLimitError("agg-1", "exceeds per-batch limit");
+      },
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: incrementHandler,
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+        maxRetries: 3,
+      }),
+    ).rejects.toBeInstanceOf(EventLimitError);
+    expect(appendCalls).toBe(1); // retry 対象外
+  });
+
+  it("CT-EC-28 load が ConcurrencyError を投げる → retry せず伝播 (handler / append 未到達)", async () => {
+    let handlerCalls = 0;
+    let appendCalls = 0;
+    const store = {
+      load: () => {
+        throw new ConcurrencyError("agg-1", 0);
+      },
+      append: () => {
+        appendCalls += 1;
+        return [] as never;
+      },
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: (a, i) => {
+          handlerCalls += 1;
+          return incrementHandler(a, i);
+        },
+        aggregateId: "agg-1",
+        input: { amount: 1 },
+        maxRetries: 3,
+      }),
+    ).rejects.toBeInstanceOf(ConcurrencyError);
+    expect(handlerCalls).toBe(0);
+    expect(appendCalls).toBe(0);
+  });
+
+  it("CT-EC-29 multi-event batch: decided を順に fold し version は +N・連番で返る", async () => {
+    // 非可換な evolve (push) で fold 順を検証する。
+    const cfg = {
+      initialState: [] as string[],
+      evolve: {
+        Appended: (s: readonly string[], d: { v: string }) => [...s, d.v],
+      },
+    };
+    const store = new InMemoryEventStore<{ Appended: { v: string } }>();
+    const res = await executeCommand({
+      config: cfg,
+      store,
+      handler: () => [
+        { type: "Appended", data: { v: "a" } },
+        { type: "Appended", data: { v: "b" } },
+      ],
+      aggregateId: "agg-1",
+      input: undefined,
+    });
+    expect(res.aggregate.state).toEqual(["a", "b"]); // decided 順に fold
+    expect(res.aggregate.version).toBe(2);
+    expect(res.newEvents.map((e) => e.version)).toEqual([1, 2]);
+    expect((await store.load("agg-1")).map((e) => e.version)).toEqual([1, 2]);
+  });
+
+  it("CT-EC-30 不純な evolve が data を mutate しても永続化 payload は無傷", async () => {
+    const store = new InMemoryEventStore<{ Mutating: { v: number } }>();
+    const cfg = {
+      initialState: 0,
+      evolve: {
+        Mutating: (s: number, d: { v: number }) => {
+          // evolve は data の clone を受け取るので、ここでの破壊は永続化 payload に波及しない
+          (d as { v: number; extra?: boolean }).extra = true;
+          return s + d.v;
+        },
+      },
+    };
+    const res = await executeCommand({
+      config: cfg,
+      store,
+      handler: () => [{ type: "Mutating", data: { v: 1 } }],
+      aggregateId: "agg-1",
+      input: undefined,
+    });
+    expect(res.newEvents[0]?.data).toEqual({ v: 1 });
+    expect((await store.load("agg-1"))[0]?.data).toEqual({ v: 1 });
+  });
+
+  it("CT-EC-31 EventStore.append の postcondition 違反 → TypeError", async () => {
+    const mkStored = (over: Record<string, unknown>) => ({
+      type: "Incremented",
+      data: { amount: 1 },
+      aggregateId: "agg-1",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      ...over,
+    });
+    const cases: Array<[string, () => unknown]> = [
+      ["version ずれ", () => [mkStored({ version: 2 })]],
+      ["version 重複", () => [mkStored({ version: 0 })]],
+      ["aggregateId 不一致", () => [mkStored({ aggregateId: "other" })]],
+      ["非配列", () => ({ length: 1 })],
+      ["null 要素", () => [null]],
+    ];
+    for (const [name, makeResult] of cases) {
+      const store = {
+        load: () => Promise.resolve([]),
+        append: () => Promise.resolve(makeResult()),
+      };
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store: store as never,
+          handler: incrementHandler,
+          aggregateId: "agg-1",
+          input: { amount: 1 },
+        }),
+        name,
+      ).rejects.toBeInstanceOf(TypeError);
+    }
   });
 
   it("CT-EC-25 aggregateId / correlationId の契約違反 → TypeError (load 前)", async () => {

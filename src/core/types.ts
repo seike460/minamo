@@ -60,7 +60,9 @@ export type EventMap = Record<string, unknown>;
  * `EventsOf<{}>` は `never`。
  */
 export type EventsOf<TMap extends EventMap> = {
-  [K in keyof TMap & string]: DomainEvent<K, TMap[K]>;
+  // `Exclude<..., undefined>`: optional key (`A?: ...`) の `| undefined` が data に
+  // 残ると runtime が reject する値まで型が許してしまうため除く。
+  [K in keyof TMap & string]: DomainEvent<K, Exclude<TMap[K], undefined>>;
 }[keyof TMap & string];
 
 /**
@@ -69,7 +71,7 @@ export type EventsOf<TMap extends EventMap> = {
  * `EventStore.load` / `EventStore.append` の返り値型に使う。
  */
 export type StoredEventsOf<TMap extends EventMap> = {
-  [K in keyof TMap & string]: StoredEvent<K, TMap[K]>;
+  [K in keyof TMap & string]: StoredEvent<K, Exclude<TMap[K], undefined>>;
 }[keyof TMap & string];
 
 /**
@@ -100,5 +102,10 @@ export type Upcaster<TMap extends EventMap> = (
  * @typeParam TMap - Aggregate が扱うイベント型マップ。
  */
 export type Evolver<TState, TMap extends EventMap> = {
-  [K in keyof TMap & string]: (state: ReadonlyDeep<TState>, data: ReadonlyDeep<TMap[K]>) => TState;
+  // `-?`: EventMap の optional key (`A?: ...`) でも handler の省略を許さない。
+  // 省略を許すと永続化済み event が `missing_evolve_handler` で rehydrate 不能になる。
+  [K in keyof TMap & string]-?: (
+    state: ReadonlyDeep<TState>,
+    data: ReadonlyDeep<Exclude<TMap[K], undefined>>,
+  ) => TState;
 };

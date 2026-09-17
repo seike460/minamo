@@ -76,4 +76,30 @@ describe("DynamoSnapshotStore.load envelope validation (DEC-026)", () => {
     const { store } = storeReturning({ Item: rest });
     await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
   });
+
+  it.each([
+    0, -1, 1.5,
+  ])("throws TypeError when version is %s (non-positive/non-integer)", async (v) => {
+    const { store } = storeReturning({ Item: { ...wellFormed, version: v } });
+    await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("rejects fields forged through [[Prototype]] (util-dynamodb __proto__ pollution)", async () => {
+    // unmarshall は "__proto__" キーで返り値の [[Prototype]] を汚染する。
+    // 必須 field を汚染 prototype 経由で見せかける item は own-property 検査で弾く。
+    const proto = { version: 9, aggregateId: "a-1", timestamp: "t" };
+    const forged = Object.create(proto) as Record<string, unknown>;
+    forged.state = { count: 1 };
+    const { store } = storeReturning({ Item: forged });
+    await expect(store.load("a-1")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("normalizes a polluted [[Prototype]] inside state via structuredClone", async () => {
+    const state = JSON.parse('{"count":1,"__proto__":{"x":9}}') as SnapState;
+    const { store } = storeReturning({ Item: { ...wellFormed, state } });
+    const snap = await store.load("a-1");
+    // structuredClone で正規化されるため、own "__proto__" キーも汚染 prototype も残らない
+    expect(snap?.state).toEqual({ count: 1 });
+    expect(Object.getPrototypeOf(snap?.state)).toBe(Object.prototype);
+  });
 });

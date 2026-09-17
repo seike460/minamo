@@ -12,7 +12,7 @@
  * node_modules の upward 解決で devDependencies の SDK が見えてしまい偽陽性になるため。
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,8 +45,41 @@ if (!bridgeThrew) throw new Error("parseStreamRecord did not fail fast without A
 console.log("optional peer isolation verified");
 `;
 
+// 型レベルの隔離も検証する。.d.ts には @aws-sdk/* への `import type` が残るため、
+// SDK 不在 + `skipLibCheck: false` では TS2307 になるが、推奨設定の `skipLibCheck: true`
+// では InMemory 専用 consumer が型解決できることを保証する (docs/pitfalls.md §5)。
+const pkgDir = join(dir, "pkg");
+mkdirSync(pkgDir, { recursive: true });
+mkdirSync(join(dir, "node_modules", "@seike460"), { recursive: true });
+symlinkSync(dir, join(dir, "node_modules", "@seike460", "minamo"), "dir");
+writeFileSync(
+  join(pkgDir, "test.ts"),
+  `import { InMemoryEventStore } from "@seike460/minamo";
+const store = new InMemoryEventStore<{ E: { n: number } }>();
+void store;
+`,
+);
+const tsc = join(root, "node_modules", "typescript", "bin", "tsc");
+
 try {
   execFileSync(process.execPath, ["--input-type=module", "-e", program], { stdio: "inherit" });
+  execFileSync(
+    process.execPath,
+    [
+      tsc,
+      "--noEmit",
+      "--strict",
+      "--module",
+      "nodenext",
+      "--moduleResolution",
+      "nodenext",
+      "--target",
+      "es2024",
+      "--skipLibCheck",
+      join(pkgDir, "test.ts"),
+    ],
+    { stdio: "inherit" },
+  );
   console.log("✓ optional peer verification passed");
 } finally {
   rmSync(dir, { recursive: true, force: true });

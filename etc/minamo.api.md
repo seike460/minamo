@@ -122,7 +122,7 @@ export function eventNamesOf<TState, TMap extends EventMap>(config: AggregateCon
 
 // @public
 export type EventsOf<TMap extends EventMap> = {
-    [K in keyof TMap & string]: DomainEvent<K, TMap[K]>;
+    [K in keyof TMap & string]: DomainEvent<K, Exclude<TMap[K], undefined>>;
 }[keyof TMap & string];
 
 // @public
@@ -134,12 +134,12 @@ export interface EventStore<TMap extends EventMap> {
 
 // @public
 export interface EventStoreTable {
-    for<TMap extends EventMap>(): DynamoEventStore<TMap>;
+    for<TMap extends EventMap = never>(): DynamoEventStore<TMap>;
 }
 
 // @public
 export type Evolver<TState, TMap extends EventMap> = {
-    [K in keyof TMap & string]: (state: ReadonlyDeep<TState>, data: ReadonlyDeep<TMap[K]>) => TState;
+    [K in keyof TMap & string]-?: (state: ReadonlyDeep<TState>, data: ReadonlyDeep<Exclude<TMap[K], undefined>>) => TState;
 };
 
 // @public
@@ -352,7 +352,7 @@ export interface StoredEvent<TType extends string = string, TData = unknown> ext
 
 // @public
 export type StoredEventsOf<TMap extends EventMap> = {
-    [K in keyof TMap & string]: StoredEvent<K, TMap[K]>;
+    [K in keyof TMap & string]: StoredEvent<K, Exclude<TMap[K], undefined>>;
 }[keyof TMap & string];
 
 // @public

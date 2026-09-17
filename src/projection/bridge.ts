@@ -1,7 +1,7 @@
 import type { AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEvent } from "../core/types.js";
 import { InvalidStreamRecordError } from "../errors.js";
-import { clip } from "../internal/guards.js";
+import { clip, normalizePlainData } from "../internal/guards.js";
 import { requirePeer } from "../internal/require-peer.js";
 
 /** `parseStreamRecord` の optional な挙動切替。 */
@@ -112,10 +112,22 @@ export function parseStreamRecord<
     );
   }
 
+  let data: unknown;
+  try {
+    // unmarshall 産物はネスト map の __proto__ キーで汚染されうるため clone +
+    // own `__proto__` key 除去で正規化する (fromItem と同じ normalizePlainData)。
+    data = normalizePlainData(item.data);
+  } catch {
+    // 非 cloneable な data は InvalidStreamRecordError に揃える (生 DataCloneError ではなく)。
+    throw new InvalidStreamRecordError(
+      "unmarshal_failed",
+      "data attribute is not cloneable",
+      "data",
+    );
+  }
   const base = {
     type: item.type as TEventName,
-    // unmarshall 産物はネスト map の __proto__ キーで汚染されうるため clone で正規化する。
-    data: structuredClone(item.data) as unknown,
+    data,
     aggregateId: item.aggregateId,
     version: item.version,
     timestamp: item.timestamp,

@@ -125,6 +125,8 @@ const store = new DynamoEventStore<Events>({
 
 The SDK is resolved lazily at use time (DEC-027), so importing minamo without the SDK installed works and only Dynamo-backed calls fail. If you bundle your handler (esbuild, etc.), mark `@aws-sdk/*` as **external** — the lazy resolution looks in `node_modules`, so a bundled-in SDK would still surface as "not installed". Lambda runtimes ship the AWS SDK anyway, so keeping it external is also the size-optimal setup. Keep the bundle output **ESM**: the lazy resolver is built on `import.meta.url`, which bundlers erase in CJS output — degrading to CJS breaks even InMemory-only imports.
 
+The same optionality holds at the type level as long as `skipLibCheck` is on (the `tsc --init` default and the community recommendation). The published `.d.ts` files still carry `import type` references to `@aws-sdk/*` — with `skipLibCheck: false` and no SDK installed, `tsc` reports `TS2307` inside minamo's declarations even for InMemory-only consumers. Keep `skipLibCheck: true`, or install the SDK packages as devDependencies if you deliberately check libraries.
+
 ---
 
 ## 6. Contract Tests cover `append` / `load`, not projection timing
@@ -160,11 +162,16 @@ Both built-in stores enforce the same input contract, so an `InMemoryEventStore`
 - every event needs a non-empty string `type` and an own `data` property — `EventLimitError` otherwise. A malformed event committed to a real stream would poison every future `rehydrate`, so `append` rejects it before any write
 - `correlationId`, when provided, must be a string — `TypeError` otherwise (a non-string would marshall as a number and silently vanish on read)
 
+Event `data` and snapshot `state` must additionally be *plain data* (DEC-011) — the set of values that round-trip identically through `structuredClone` and DynamoDB marshall/unmarshall. `append` and `SnapshotStore.save` validate this recursively and reject with `TypeError`:
+
+- rejected: `undefined` values (nested included), functions, symbols, non-finite numbers (`NaN`/`Infinity`), `bigint`, `Map`, `Set`, `Date`, `RegExp`, class instances, `ArrayBuffer`/views other than `Uint8Array` (including `Buffer` and `Uint8Array` subclasses — unmarshall always returns a plain `Uint8Array`), circular references, own `__proto__` keys, enumerable symbol keys, and nesting deeper than 32 levels (DynamoDB's limit)
+- accepted: `null`, booleans, finite numbers, strings, `Uint8Array`, arrays, and objects whose prototype is `Object.prototype` or `null`
+
 Two type-level constraints to know about:
 
 - `EventMap` is `Record<string, unknown>`, so declare event maps with `type` aliases. An `interface` without an index signature does **not** satisfy the constraint.
-- Event `data` must not be `undefined` at runtime. `structuredClone` keeps `undefined` fields but DynamoDB `marshall` drops them — the InMemory and DynamoDB stores would persist different payloads. Declare payload fields optional instead (`{ activatedAt?: string }`).
+- Event `data` must not be `undefined` at runtime. `structuredClone` keeps `undefined` fields but DynamoDB `marshall` drops them — the InMemory and DynamoDB stores would persist different payloads. Declare payload fields optional instead (`{ activatedAt?: string }`). Note that an optional EventMap *key* (`{ A?: { ... } }`) still makes `A` a required entry in `evolve` — omitting it is a compile error, since a persisted `A` event with no handler would make the stream un-rehydratable.
 
-For the same reason `executeCommand` validates the `EventStore` / `SnapshotStore` contracts at runtime (load must return an array, append must return exactly the committed events with sequential versions, snapshots must carry `aggregateId` / `version` / `state`). A custom store that violates the contract fails loudly with `TypeError` instead of corrupting the stream.
+For the same reason `executeCommand` validates the `EventStore` / `SnapshotStore` contracts at runtime (load must return an array, append must return exactly the committed events with sequential versions, snapshots must carry `aggregateId` / `version` / `state` / `timestamp`). A custom store that violates the contract fails loudly with `TypeError` instead of corrupting the stream.
 
 Finally, `DynamoEventStore` maps a `TransactionCanceledException` whose cancellation reason is `TransactionConflict` — not just `ConditionalCheckFailed` — to `ConcurrencyError`, so same-aggregate contention under parallel transactions is retried by `executeCommand` like any other optimistic-locking collision.

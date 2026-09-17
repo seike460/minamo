@@ -182,8 +182,11 @@ export class DynamoEventStore<TMap extends EventMap> implements EventStore<TMap>
       // transaction は rollback 済みなので retry して安全 (ConcurrencyError と同じ扱い)。
       if (
         isTransactionCanceledException(err) &&
-        reasons?.some(
-          (r) => r.Code === "ConditionalCheckFailed" || r.Code === "TransactionConflict",
+        // 手作りの fake error でも catch 内で生 TypeError に置き換わらないよう防御する
+        // (非配列 / null 要素)。
+        Array.isArray(reasons) &&
+        reasons.some(
+          (r) => r?.Code === "ConditionalCheckFailed" || r?.Code === "TransactionConflict",
         )
       ) {
         throw new ConcurrencyError(aggregateId, expectedVersion);

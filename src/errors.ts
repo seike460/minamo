@@ -1,3 +1,4 @@
+import { clip } from "./internal/clip.js";
 import type { StandardSchemaIssue } from "./standard-schema.js";
 
 /**
@@ -27,7 +28,7 @@ export class ConcurrencyError extends Error {
     /** append 時に呼び出し側が想定していた version。 */
     readonly expectedVersion: number,
   ) {
-    super(`Concurrency conflict on aggregate ${aggregateId} at version ${expectedVersion}`);
+    super(`Concurrency conflict on aggregate ${clip(aggregateId)} at version ${expectedVersion}`);
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -68,7 +69,7 @@ export class RetryExhaustedError extends Error {
     cause: ConcurrencyError,
   ) {
     super(
-      `Concurrency conflict on aggregate ${aggregateId} unresolved after ${attempts} attempt(s)`,
+      `Concurrency conflict on aggregate ${clip(aggregateId)} unresolved after ${attempts} attempt(s)`,
       { cause },
     );
     Object.setPrototypeOf(this, new.target.prototype);
@@ -108,11 +109,15 @@ export class ValidationError extends Error {
 }
 
 function formatIssue(issue: StandardSchemaIssue): string {
-  if (!issue.path || issue.path.length === 0) return issue.message;
+  // vendor 実装が spec 非準拠の issue (null / path 非配列 / message 非文字列) を
+  // 返しても生 TypeError に落とさず、読める message に fallback する。
+  if (issue === null || typeof issue !== "object") return String(issue);
+  const message = typeof issue.message === "string" ? issue.message : String(issue.message);
+  if (!Array.isArray(issue.path) || issue.path.length === 0) return message;
   const path = issue.path
     .map((seg) => (typeof seg === "object" && seg !== null ? String(seg.key) : String(seg)))
     .join(".");
-  return `${path}: ${issue.message}`;
+  return `${path}: ${message}`;
 }
 
 /**

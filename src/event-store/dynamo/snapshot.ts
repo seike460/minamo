@@ -1,6 +1,6 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { assertAggregateId, assertSnapshot } from "../../internal/guards.js";
+import { assertAggregateId, assertSnapshot, normalizePlainData } from "../../internal/guards.js";
 import { requirePeer } from "../../internal/require-peer.js";
 import type { Snapshot, SnapshotStore } from "../../snapshot/types.js";
 import { resolveDocumentClient } from "./client.js";
@@ -43,11 +43,19 @@ function fromSnapshotItem<TState>(item: Record<string, unknown>): Snapshot<TStat
   if (!Object.hasOwn(item, "state") || item.state === undefined) {
     throw new TypeError("DynamoDB snapshot item missing state attribute");
   }
+  let state: TState;
+  try {
+    // unmarshall 産物のネスト map は __proto__ 汚染されうるため clone + own `__proto__`
+    // key 除去で正規化する (fromItem と同じ normalizePlainData)。
+    state = normalizePlainData(item.state) as TState;
+  } catch {
+    // 非 cloneable な state は生の DataCloneError ではなく envelope 違反の TypeError に揃える。
+    throw new TypeError("DynamoDB snapshot item has non-cloneable state");
+  }
   return {
     aggregateId: item.aggregateId,
     version: item.version,
-    // unmarshall 産物のネスト map は __proto__ 汚染されうるため clone で正規化する。
-    state: structuredClone(item.state) as TState,
+    state,
     timestamp: item.timestamp,
   };
 }

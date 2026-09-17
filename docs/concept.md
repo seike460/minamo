@@ -1305,6 +1305,7 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
   - DEC-010 で `input` に注入した値（時刻、UUID 等）も、イベントの `data` や Aggregate の `state` に含まれる時点でこの plain data 制約に従う
   - TypeScript の型レベルではこの制約を完全には強制できないが、`ReadonlyDeep<TState>` で immutability を示唆し、ドキュメントで plain data の制約を明示する
 - **棄却した代替案:** (a) `PlainData<T>` conditional type で Function / Symbol / Date 等を型レベルで排除する案 → 再帰型のコンパイル性能コストが高く、深いネストでの TypeScript の型推論が不安定になる (b) runtime validation（`assertPlainData` 関数）を `append` の境界で実行する案 → runtime オーバーヘッドが発生し、「DynamoDB API 呼び出し以外のオーバーヘッドを加えない」原則（セクション 4）に反する
+- **改訂（v0.2.0 品質修正）:** 代替案 (b) は後日採用された。実装レビューで InMemory の `structuredClone` と DynamoDB の marshall/unmarshall が同一入力に対し静かに食い違う経路（own `__proto__` key の消失、`Date`/`Map`/class instance の型崩れ、nested `undefined` の attr 喪失、循環参照での生 `DataCloneError`）が確認され、fail-loud な入力検証の方が「書けたが二度と読めない」stream poison より優先されると判断した。`assertPlainData` は event `data` / snapshot `state` に対し `append` / `save` 境界で再帰検証を行い、違反は `TypeError` で reject する。バイナリは `Uint8Array` 直生インスタンスのみ受理する（unmarshall が常に `Uint8Array` を返すため `Buffer`・`DataView`・`ArrayBuffer` は round-trip で型が変わる）。オーバーヘッドは payload 1 回の走査に留まり、DynamoDB のネットワーク呼び出しに対し誤差の範囲である
 
 > **Fact:** structured clone algorithm の仕様。
 > Source: https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal (checked: 2026-04-12)
@@ -1584,7 +1585,7 @@ DynamoDB + Lambda + 結果整合性の基本理解がある開発者が、concep
 
 - [ ] Node.js 24+ および pnpm がインストール済み
 - [ ] AWS アカウントと DynamoDB テーブル作成権限（Step 2 以降で必要。Step 1 はローカルのみ）
-- [ ] TypeScript 5.0+ の開発環境（ESM: `"type": "module"` が前提。`tsconfig.json` は `"module": "NodeNext"`, `"moduleResolution": "NodeNext"` を推奨）
+- [ ] TypeScript 5.4+ の開発環境（`NoInfer` utility type が built-in 化された下限。ESM: `"type": "module"` が前提。`tsconfig.json` は `"module": "NodeNext"`, `"moduleResolution": "NodeNext"` を推奨）
 
 ### Step 1: InMemory でのローカル試行（5 分）
 

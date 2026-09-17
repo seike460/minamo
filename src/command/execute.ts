@@ -2,7 +2,7 @@ import type { Aggregate, AggregateConfig } from "../core/aggregate.js";
 import type { EventMap, StoredEventsOf } from "../core/types.js";
 import { ConcurrencyError, InvalidEventStreamError, RetryExhaustedError } from "../errors.js";
 import type { AppendOptions, EventStore } from "../event-store/types.js";
-import { assertAggregateId, clip } from "../internal/guards.js";
+import { assertAggregateId, assertPlainData, clip } from "../internal/guards.js";
 import type { ExecuteObserver } from "../observability.js";
 import type { Snapshot, SnapshotPolicy, SnapshotStore } from "../snapshot/types.js";
 import type { ReadonlyDeep } from "../types.js";
@@ -152,7 +152,7 @@ function replayEvents<TState, TMap extends EventMap>(
     if (handler === undefined) continue;
     state = handler(
       state as ReadonlyDeep<TState>,
-      e.data as ReadonlyDeep<TMap[keyof TMap & string]>,
+      e.data as ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>,
     );
   }
 
@@ -233,6 +233,12 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
           `SnapshotStore.load returned snapshot missing state for "${aggregateId}"`,
         );
       }
+      // save 側 (assertSnapshot) と対称に timestamp も検証する。
+      if (typeof snapshot.timestamp !== "string") {
+        throw new TypeError(
+          `SnapshotStore.load returned snapshot missing string timestamp for "${aggregateId}"`,
+        );
+      }
       const loaded =
         typeof store.loadFrom === "function"
           ? await store.loadFrom(aggregateId, snapshot.version)
@@ -240,17 +246,34 @@ async function loadAndRehydrate<TState, TMap extends EventMap>(
       if (!Array.isArray(loaded)) {
         throw new TypeError("EventStore.loadFrom/load must return an array");
       }
-      const tail =
-        typeof store.loadFrom === "function"
-          ? loaded
-          : loaded.filter((e) => e.version > snapshot.version);
-      const aggregate = replayEvents(
-        config,
-        aggregateId,
-        structuredClone(snapshot.state) as TState,
-        snapshot.version,
-        tail,
-      );
+      let tail = loaded;
+      if (typeof store.loadFrom !== "function") {
+        // filter は replayEvents の shape 検証より先に e.version に触れるため、
+        // malformed 要素 (null / version 欠落) をここで fail-loud に弾く。
+        for (const e of loaded) {
+          if (
+            e === null ||
+            typeof e !== "object" ||
+            typeof (e as { version?: unknown }).version !== "number"
+          ) {
+            throw new TypeError(
+              "EventStore.load returned a malformed event (missing numeric version)",
+            );
+          }
+        }
+        tail = loaded.filter((e) => e.version > snapshot.version);
+      }
+      let baseState: TState;
+      try {
+        baseState = structuredClone(snapshot.state) as TState;
+      } catch {
+        // custom SnapshotStore が非 cloneable な state (関数・Symbol 等) を返した場合、
+        // 生の DataCloneError (DOMException) ではなく契約違反として TypeError に正規化する。
+        throw new TypeError(
+          `SnapshotStore.load returned non-cloneable state for ${clip(aggregateId)}`,
+        );
+      }
+      const aggregate = replayEvents(config, aggregateId, baseState, snapshot.version, tail);
       return { aggregate, replayedCount: tail.length };
     }
   }
@@ -330,6 +353,13 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new RangeError(`maxRetries must be a non-negative integer, got: ${String(maxRetries)}`);
   }
+  // NaN / ±Infinity は `everyNEvents < 1` の「無効化」分岐をすり抜けて
+  // 二度と発火しない (または比較不能になる) ため明示的に弾く。
+  if (snapshotPolicy !== undefined && !Number.isFinite(snapshotPolicy.everyNEvents)) {
+    throw new TypeError(
+      `snapshotPolicy.everyNEvents must be a finite number, got: ${String(snapshotPolicy.everyNEvents)}`,
+    );
+  }
   assertAggregateId(aggregateId);
   if (correlationId !== undefined && typeof correlationId !== "string") {
     throw new TypeError(`correlationId must be a string (got ${typeof correlationId})`);
@@ -380,6 +410,11 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       if (!Object.hasOwn(d, "data") || d.data === undefined) {
         throw new TypeError(`handler returned event at index ${i} without data`);
       }
+      // assertPlainData は store.append 側 (assertDomainEvents) でも走るが、custom
+      // EventStore がその検証を実装しない場合に非 plain data がすり抜けるのと、
+      // evolve 用の structuredClone が生 DataCloneError を投げるのを防ぐため
+      // ここでも TypeError に揃えて弾く。
+      assertPlainData(d.data, `handler returned event at index ${i} data`);
       if (!hasEvolveHandler(config, d.type)) {
         throw new InvalidEventStreamError(
           aggregateId,
@@ -402,7 +437,7 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       // 化により mutate の被害範囲が「返り値」から「永続化データ」に拡大したため防御)。
       updatedState = evolveHandler(
         updatedState as ReadonlyDeep<TState>,
-        structuredClone(d.data) as ReadonlyDeep<TMap[keyof TMap & string]>,
+        structuredClone(d.data) as ReadonlyDeep<Exclude<TMap[keyof TMap & string], undefined>>,
       );
     }
 
@@ -414,8 +449,13 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
     try {
       newEvents = await store.append(aggregateId, decided, aggregate.version, appendOptions);
     } catch (err) {
-      if (err instanceof ConcurrencyError) {
-        lastConcurrency = err;
+      // dual-install 耐性: 別コピーの minamo 経由で投げられた ConcurrencyError も
+      // retry 対象にする (TransactionCanceledException の name 判定と同じ方針)。
+      const isConcurrency =
+        err instanceof ConcurrencyError ||
+        (err instanceof Error && err.name === "ConcurrencyError");
+      if (isConcurrency) {
+        lastConcurrency = err as ConcurrencyError;
         observer?.onConcurrencyConflict?.({
           aggregateId,
           expectedVersion: aggregate.version,
@@ -448,28 +488,36 @@ export async function executeCommand<TState, TMap extends EventMap, TInput>(para
       }
     }
     const version = aggregate.version + newEvents.length;
-    observer?.onCommitted?.({ aggregateId, newEventCount: newEvents.length, version });
-
-    if (snapshotStore !== undefined && shouldSnapshot(snapshotPolicy, aggregate.version, version)) {
-      // snapshot save は best-effort (DEC-026): append は既に commit 済みのため、save 失敗で
-      // command 全体を reject すると、呼び出し側が「失敗」とみなして再実行し二重書き込みを招く。
-      // snapshot は rehydration の最適化であり、save が失敗しても次回は前回 snapshot か full replay
-      // で正答する。framework-free を保つため log もしない（可覚測性 hook は public surface を
-      // 拡大するため別途扱い）。
-      // clone も try の内側: 非 cloneable な state (DEC-011 違反) での DataCloneError も
-      // post-commit の失敗に見せない。
-      try {
-        const snapshot: Snapshot<TState> = {
-          aggregateId,
-          version,
-          // caller へ返す aggregate.state と共有しない (custom SnapshotStore が参照を
-          // 保持する場合に、caller 側の mutation が保存済み snapshot に波及しないように)。
-          state: structuredClone(updatedState) as TState,
-          timestamp: new Date().toISOString(),
-        };
-        await snapshotStore.save(snapshot);
-      } catch {
-        // best-effort: swallow（上記コメントの理由により command の成功を妨げない）
+    try {
+      observer?.onCommitted?.({ aggregateId, newEventCount: newEvents.length, version });
+    } finally {
+      // onCommitted が throw しても閾値到達済みの snapshot save は試行する
+      // (observer の失敗で snapshot が静かに欠落し、次回 rehydrate が full replay に
+      // 戻る二次障害を防ぐ)。
+      if (
+        snapshotStore !== undefined &&
+        shouldSnapshot(snapshotPolicy, aggregate.version, version)
+      ) {
+        // snapshot save は best-effort (DEC-026): append は既に commit 済みのため、save 失敗で
+        // command 全体を reject すると、呼び出し側が「失敗」とみなして再実行し二重書き込みを招く。
+        // snapshot は rehydration の最適化であり、save が失敗しても次回は前回 snapshot か full replay
+        // で正答する。framework-free を保つため log もしない（可覚測性 hook は public surface を
+        // 拡大するため別途扱い）。
+        // clone も try の内側: 非 cloneable な state (DEC-011 違反) での DataCloneError も
+        // post-commit の失敗に見せない。
+        try {
+          const snapshot: Snapshot<TState> = {
+            aggregateId,
+            version,
+            // caller へ返す aggregate.state と共有しない (custom SnapshotStore が参照を
+            // 保持する場合に、caller 側の mutation が保存済み snapshot に波及しないように)。
+            state: structuredClone(updatedState) as TState,
+            timestamp: new Date().toISOString(),
+          };
+          await snapshotStore.save(snapshot);
+        } catch {
+          // best-effort: swallow（上記コメントの理由により command の成功を妨げない）
+        }
       }
     }
 

@@ -125,6 +125,8 @@ const store = new DynamoEventStore<Events>({
 
 SDK は利用時点で lazy 解決される (DEC-027)。SDK 未 install でも `import` 自体は成功し、Dynamo 系の利用時のみ明示的なエラーになる。handler を bundler (esbuild 等) で bundle する場合は `@aws-sdk/*` を **external** にすること — lazy 解決は `node_modules` を探すため、SDK を bundle に含めると「not installed」エラーになる。Lambda runtime は AWS SDK を同梱するため external は容量面でも有利。出力は **ESM のまま** にすること — lazy 解決は `import.meta.url` 上に構築されており、bundler が CJS に変換するとこれが消えて InMemory 利用の import すら壊れる。
 
+型レベルでも `skipLibCheck` が有効な限り同じ任意性が保たれる (`tsc --init` のデフォルトでありコミュニティの推奨設定)。公開される `.d.ts` には `@aws-sdk/*` への `import type` 参照が残るため、`skipLibCheck: false` で SDK 未 install の場合、InMemory のみの利用でも minamo の宣言ファイル内で `TS2307` が報告される。`skipLibCheck: true` を維持するか、敢えて library まで check する場合は SDK パッケージを devDependencies として install すること。
+
 ---
 
 ## 6. Contract Tests は `append` / `load` の契約を保証する。projection timing は保証しない
@@ -160,11 +162,16 @@ SDK の transient error に対するリトライが必要なら、`DynamoEventSt
 - 各 event は非空の string `type` と own property の `data` が必須。違反は `EventLimitError`。不正な event が実 stream に commit されると以後の `rehydrate` が全て失敗するため、`append` は書き込み前に reject する
 - `correlationId` は指定するなら string。違反は `TypeError` (非文字列は marshall で数値化され、読み出し時に静かに消える)
 
+さらに event の `data` と snapshot の `state` は *plain data* (DEC-011) である必要がある — `structuredClone` と DynamoDB marshall/unmarshall の両方で同一に round-trip する値の集合。`append` と `SnapshotStore.save` はこれを再帰的に検証し、違反は `TypeError` で reject する:
+
+- 拒否: `undefined` 値 (ネスト内を含む)、関数、symbol、非有限数 (`NaN`/`Infinity`)、`bigint`、`Map`、`Set`、`Date`、`RegExp`、class instance、`Uint8Array` 以外の `ArrayBuffer`/view (`Buffer` や `Uint8Array` subclass を含む — unmarshall は常に素の `Uint8Array` を返す)、循環参照、own `__proto__` key、enumerable symbol key、32 階層を超えるネスト (DynamoDB の上限)
+- 受理: `null`、boolean、有限数、string、`Uint8Array`、array、prototype が `Object.prototype` または `null` の object
+
 型レベルの制約も 2 点ある:
 
 - `EventMap` は `Record<string, unknown>`。event map は `type` alias で宣言すること。index signature を持たない `interface` は制約を**満たさない**
-- event の `data` に `undefined` を実行時に渡してはいけない。`structuredClone` は `undefined` field を保持するが DynamoDB の `marshall` は落とすため、InMemory と DynamoDB で永続化内容が食い違う。payload field は optional で宣言する (`{ activatedAt?: string }`)
+- event の `data` に `undefined` を実行時に渡してはいけない。`structuredClone` は `undefined` field を保持するが DynamoDB の `marshall` は落とすため、InMemory と DynamoDB で永続化内容が食い違う。payload field は optional で宣言する (`{ activatedAt?: string }`)。なお EventMap のキーを optional (`{ A?: { ... } }`) にしても `evolve` の `A` エントリは必須のままである — 省略は compile error になる (永続化済みの `A` event に handler が無いと stream が rehydrate 不能になるため)
 
-同じ理由で `executeCommand` は `EventStore` / `SnapshotStore` の契約を実行時に検証する (load は配列を返す、append は commit した event と同数・連番を返す、snapshot は `aggregateId` / `version` / `state` を持つ)。契約違反の custom store は stream を腐らせる代わりに `TypeError` で fail-loud する。
+同じ理由で `executeCommand` は `EventStore` / `SnapshotStore` の契約を実行時に検証する (load は配列を返す、append は commit した event と同数・連番を返す、snapshot は `aggregateId` / `version` / `state` / `timestamp` を持つ)。契約違反の custom store は stream を腐らせる代わりに `TypeError` で fail-loud する。
 
 最後に、`DynamoEventStore` は cancellation reason が `TransactionConflict` の `TransactionCanceledException` も `ConditionalCheckFailed` 同様 `ConcurrencyError` に map する。並行 transaction による同一 aggregate への同時書き込み競合は、`executeCommand` で楽観的ロック衝突と同じくリトライされる。

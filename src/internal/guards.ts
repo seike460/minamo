@@ -1,6 +1,9 @@
 import { EventLimitError } from "../errors.js";
 import type { AppendOptions } from "../event-store/types.js";
 import type { Snapshot } from "../snapshot/types.js";
+import { clip } from "./clip.js";
+
+export { clip };
 
 /**
  * DynamoDB partition key の上限 (2048 bytes UTF-8)。
@@ -61,6 +64,151 @@ export function assertDomainEvents(aggregateId: string, events: ReadonlyArray<un
     if (!Object.hasOwn(e, "data") || data === undefined || typeof data === "function") {
       throw new EventLimitError(aggregateId, `event at index ${i} is missing data`);
     }
+    assertPlainData(data, `event at index ${i} data`);
+  }
+}
+
+/**
+ * DynamoDB の item ネスト上限 (32 階層)。`marshall` がこれを超えると error になるため
+ * write 側検証でも同じ上限を共有する。
+ */
+const MAX_PLAIN_DATA_DEPTH = 32;
+
+/**
+ * `data` / `state` が DEC-011 の "plain data" 契約を満たすかを再帰検証する。
+ *
+ * 背景 (痛み C の残存穴): InMemory は `structuredClone` で何でも保持する一方、
+ * DynamoDB 側は `marshall`/`unmarshall` で値が静かに変形・消失するケースがある
+ * (own `__proto__` key・nested `undefined`・Date→`{}`・symbol key 等)。
+ * 逆方向もあり、循環参照は InMemory で受理され DynamoDB では size 見積もりの
+ * `JSON.stringify` が生 `TypeError` を投げる。write 側で両 store に同じ制約を
+ * 課すことで backend 間の silent divergence をなくす。
+ *
+ * 受理は「InMemory (structuredClone) と DynamoDB (marshall→unmarshall) の両方で
+ * 同一に round-trip する値」に限定する — 受理しても型が変わって戻る値は
+ * reject 側に倒す (bigint→number、Map→object、Date→`{}`、ArrayBuffer→Uint8Array 等)。
+ *
+ * 受理: null / boolean / 有限数 / string / Uint8Array / array / plain object
+ *       (prototype が Object.prototype または null のもの)
+ * 拒否: undefined (marshall が field ごと落とす) / function / symbol / 非有限数 /
+ *       bigint (N→number で型を失う) / Map (M→object で型を失う) / Set
+ *       (content 型依存で unmarshall が揺れる) / Date・RegExp・class instance 等の
+ *       非 plain object / ArrayBuffer・非 Uint8Array view (view 型が失われる) /
+ *       own `__proto__` key / enumerable symbol key / 循環参照 / 深さ 32 超過
+ */
+export function assertPlainData(value: unknown, what: string): void {
+  assertPlainDataValue(value, what, new Set(), 0);
+}
+
+/**
+ * store 由来の `data` / `state` を `structuredClone` で隔離し、own `__proto__` key を
+ * 再帰的に除去して正規化する。
+ *
+ * unmarshall は `"__proto__"` Map で返り値の [[Prototype]] を汚染する — clone が
+ * [[Prototype]] を Object.prototype に戻すのは確認済みだが、own `__proto__` *data* key は
+ * CreateDataProperty で clone に保持される。この key は InMemory 経路では残り
+ * DynamoDB 経路では (setter 吸収→clone で) 消えるため、read 側でも揃えて除去する。
+ */
+export function normalizePlainData<T>(value: T): T {
+  const clone = structuredClone(value);
+  stripProtoKeys(clone, new Set());
+  return clone;
+}
+
+function stripProtoKeys(value: unknown, seen: Set<object>): void {
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const v of value) stripProtoKeys(v, seen);
+    return;
+  }
+  // Uint8Array 等の非 plain object は内部を触らない
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return;
+  for (const key of Object.keys(value)) {
+    if (key === "__proto__") {
+      delete (value as Record<string, unknown>)[key];
+      continue;
+    }
+    stripProtoKeys((value as Record<string, unknown>)[key], seen);
+  }
+}
+
+function assertPlainDataValue(
+  value: unknown,
+  path: string,
+  seen: Set<object>,
+  depth: number,
+): void {
+  const fail = (reason: string): never => {
+    throw new TypeError(`${path} must be plain data: ${reason}`);
+  };
+  if (value === null || typeof value !== "object") {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    if (typeof value === "number") {
+      if (Number.isFinite(value)) return;
+      fail("non-finite number is not DynamoDB marshallable");
+    } else if (typeof value === "bigint") {
+      fail("bigint is written as N but read back as number (type is lost)");
+    } else {
+      fail(
+        value === undefined
+          ? "undefined is dropped by DynamoDB marshall"
+          : `${typeof value} is not persistable`,
+      );
+    }
+    return; // fail() は never だが CFA のため明示的に終端する
+  }
+  // 以降 value は object
+  if (depth > MAX_PLAIN_DATA_DEPTH) fail(`exceeds ${MAX_PLAIN_DATA_DEPTH}-level nesting limit`);
+  if (seen.has(value)) fail("circular reference");
+  if (Array.isArray(value)) {
+    seen.add(value);
+    try {
+      for (let i = 0; i < value.length; i++) {
+        assertPlainDataValue(value[i], `${path}[${i}]`, seen, depth + 1);
+      }
+    } finally {
+      seen.delete(value);
+    }
+    return;
+  }
+  // バイナリは Uint8Array のみ受理: marshall は各種 ArrayBuffer/view を B に
+  // 畳み込み、unmarshall は常に Uint8Array を返すため、それ以外の型は
+  // round-trip で型が失われる。prototype 一致で絞るのは Buffer (Uint8Array subclass、
+  // DEC-011 で明示的に禁止) やユーザ定義 subclass を弾くため。
+  if (value instanceof Uint8Array && Object.getPrototypeOf(value) === Uint8Array.prototype) return;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    fail("binary must be Uint8Array (other views lose their type on unmarshall)");
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    fail(
+      `non-plain object (${proto?.constructor?.name ?? "unknown prototype"}) loses its type on DynamoDB round-trip`,
+    );
+  }
+  if (
+    Object.getOwnPropertySymbols(value).some(
+      (s) => Object.getOwnPropertyDescriptor(value, s)?.enumerable,
+    )
+  ) {
+    fail("enumerable symbol keys are dropped by DynamoDB marshall");
+  }
+  seen.add(value);
+  try {
+    for (const key of Object.keys(value)) {
+      // own `__proto__` key は unmarshall 時に [[Prototype]] へ吸収されて消失する
+      // (marshaller.ts の pollution 防御と同根) ので書き込み側でも拒否する。
+      if (key === "__proto__") fail('own "__proto__" key is dropped on DynamoDB unmarshall');
+      assertPlainDataValue(
+        (value as Record<string, unknown>)[key],
+        `${path}.${key}`,
+        seen,
+        depth + 1,
+      );
+    }
+  } finally {
+    seen.delete(value);
   }
 }
 
@@ -75,25 +223,6 @@ export function assertAppendOptions(aggregateId: string, options: AppendOptions 
       `correlationId for aggregate ${clip(aggregateId)} must be a string (got ${typeof correlationId})`,
     );
   }
-}
-
-/**
- * error message に埋め込む文字列を安全に整形する。
- * 改行・制御文字の escape (log injection 対策) と長大入力の truncate (log flood 対策)
- * を兼ねる。主に stream / store 由来の untrusted 値向けだが、巨大化しうる
- * consumer 指定値 (aggregateId 等) にも使ってよい — JSON 引用符が付くだけで
- * message の意味は変わらない。
- */
-export function clip(value: unknown, maxLength = 256): string {
-  let s: string;
-  try {
-    s = typeof value === "string" ? value : String(value);
-  } catch {
-    // Object.create(null) や投げる toString を持つ malformed な store 由来値でも
-    // 本来の検証エラー (InvalidEventStreamError 等) を隠さないよう fallback する。
-    s = "<unprintable>";
-  }
-  return JSON.stringify(s.length > maxLength ? `${s.slice(0, maxLength)}...` : s);
 }
 
 /**
@@ -126,6 +255,7 @@ export function assertSnapshot(snapshot: Snapshot<unknown>): void {
   if (!Object.hasOwn(snapshot, "state") || snapshot.state === undefined) {
     throw new TypeError("snapshot missing state");
   }
+  assertPlainData(snapshot.state, "snapshot state");
   if (typeof snapshot.timestamp !== "string") {
     throw new TypeError("snapshot missing string timestamp");
   }

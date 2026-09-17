@@ -8,7 +8,13 @@ import type {
   SnapshotStore,
   StoredEventsOf,
 } from "../src/index.js";
-import { executeCommand, InMemoryEventStore, InMemorySnapshotStore } from "../src/index.js";
+import {
+  executeCommand,
+  InMemoryEventStore,
+  InMemorySnapshotStore,
+  InvalidEventStreamError,
+  RetryExhaustedError,
+} from "../src/index.js";
 import { type CounterEvents, counterConfig, incrementHandler } from "./fixtures/counter.js";
 
 /**
@@ -338,5 +344,162 @@ describe("executeCommand + Snapshot", () => {
     // typeof 判定で fallback → load 全件 + filter。snapshot.state(10) + tail(5) + handler(1) = 16
     expect(result.aggregate.state).toBe(16);
     expect(store.loadCalls).toBe(1);
+  });
+
+  it("snapshot.version > stream head → append の ConditionCheck が ConcurrencyError → RetryExhaustedError", async () => {
+    // snapshot が stream より進んでいる破損状態: retry しても解消しないため枯渇で fail-loud。
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-stale", [{ type: "Incremented", data: { amount: 1 } }], 0);
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-stale",
+      version: 5, // stream head (1) より進んでいる
+      state: 99,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-stale",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+        maxRetries: 2,
+      }),
+    ).rejects.toBeInstanceOf(RetryExhaustedError);
+  });
+
+  it("snapshot 以降の tail に version gap がある → InvalidEventStreamError (version_gap)", async () => {
+    // snapshot.version=3 の直後に version=5 が来る破損 stream (loadFrom で [5] が返る)。
+    const gapTail = {
+      version: 5,
+      aggregateId: "agg-gap",
+      type: "Incremented",
+      data: { amount: 7 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+    const store = {
+      load: () => Promise.resolve([gapTail]),
+      loadFrom: (_id: string, _v: number) => Promise.resolve([gapTail]),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-gap",
+      version: 3,
+      state: 30,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    const err: unknown = await executeCommand({
+      config: counterConfig,
+      store: store as never,
+      handler: incrementHandler,
+      aggregateId: "agg-gap",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(InvalidEventStreamError);
+    expect((err as InvalidEventStreamError).reason).toBe("version_gap");
+  });
+
+  it("loadFrom が非配列を返す → TypeError", async () => {
+    const store = {
+      load: () => Promise.resolve([]),
+      loadFrom: () => Promise.resolve({ length: 1 }),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-na",
+      version: 1,
+      state: 0,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: incrementHandler,
+        aggregateId: "agg-na",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("fallback filter 経路で malformed 要素 (version 欠落) → TypeError", async () => {
+    // loadFrom 未実装の store が version 欠落の要素を返すと、filter が e.version に
+    // 触れる前に fail-loud する (生 TypeError や静かな drop ではなく契約違反)。
+    const malformed = {
+      aggregateId: "agg-mf",
+      type: "Incremented",
+      data: { amount: 1 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+      // version 欠落
+    };
+    const store = {
+      load: () => Promise.resolve([malformed]),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-mf",
+      version: 1,
+      state: 0,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: store as never,
+        handler: incrementHandler,
+        aggregateId: "agg-mf",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("snapshotPolicy.everyNEvents が非有限数 → TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-nan",
+          input: { amount: 1 },
+          snapshotStore: new InMemorySnapshotStore<number>(),
+          snapshotPolicy: { everyNEvents: bad },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("onCommitted が throw しても閾値到達済みの snapshot save は試行される", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<number>();
+    await store.append("agg-oc", [{ type: "Incremented", data: { amount: 1 } }], 0);
+    // version 1→2 で everyNEvents: 2 の閾値を跨ぐ → snapshot save 対象
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-oc",
+        input: { amount: 1 },
+        observer: {
+          onCommitted: () => {
+            throw new Error("observer exploded");
+          },
+        },
+        snapshotStore: snapshots,
+        snapshotPolicy: { everyNEvents: 2 },
+      }),
+    ).rejects.toThrow("observer exploded");
+    // observer の失敗にもかかわらず snapshot は保存されている (finally 経路)
+    expect(await snapshots.load("agg-oc")).not.toBeNull();
   });
 });

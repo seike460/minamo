@@ -1,5 +1,6 @@
 import type { StoredEvent } from "../../core/types.js";
 import { EventLimitError } from "../../errors.js";
+import { normalizePlainData } from "../../internal/guards.js";
 
 /**
  * DynamoDB item の shape。`DynamoDBDocumentClient` が marshall/unmarshall を担うため
@@ -70,13 +71,23 @@ export function fromItem(raw: Record<string, unknown>): StoredEvent<string, unkn
     throw new TypeError("DynamoDB item missing data attribute");
   }
 
+  let data: unknown;
+  try {
+    data = normalizePlainData(raw.data);
+  } catch {
+    // 非 cloneable な data (synthetic item での関数混入等) は生の DataCloneError
+    // ではなく envelope 違反として TypeError に揃える。
+    throw new TypeError("DynamoDB item has non-cloneable data attribute");
+  }
   const base = {
     aggregateId: raw.aggregateId,
     version: raw.version,
     type: raw.type,
-    // structuredClone で深層まで [[Prototype]] を正規化する (unmarshall 産物はネストした
-    // map 内の __proto__ キーでも汚染されうる)。own enumerable な値は全て保持される。
-    data: structuredClone(raw.data),
+    // structuredClone + own __proto__ key の再帰除去で正規化する (unmarshall 産物は
+    // ネストした map 内の __proto__ キーで [[Prototype]] が汚染されうる。
+    // clone は汚染 prototype を落とすが own `__proto__` data key は保持するため
+    // normalizePlainData で除去する)。
+    data,
     timestamp: raw.timestamp,
   };
   // correlationId も own property を要求する: 汚染された [[Prototype]] 経由の
