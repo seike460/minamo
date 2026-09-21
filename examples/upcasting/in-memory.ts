@@ -23,13 +23,20 @@ type WalletEvents = {
 /** 旧 "Credited"({ value }) → 現行 "Deposited"({ amount })。メタデータは保持する。 */
 const upcast: Upcaster<WalletEvents> = (raw) => {
   if (raw.type === "Credited") {
-    const { value } = raw.data as { value: number };
+    // 旧スキーマの payload は型の外の入力。読む前に shape を検査する。
+    const data: unknown = raw.data;
+    if (typeof data !== "object" || data === null || !("value" in data)) {
+      throw new TypeError('legacy "Credited" event has no "value" field');
+    }
+    if (typeof data.value !== "number") {
+      throw new TypeError('legacy "Credited" event has non-numeric "value"');
+    }
     return {
       aggregateId: raw.aggregateId,
       version: raw.version,
       timestamp: raw.timestamp,
       type: "Deposited",
-      data: { amount: value },
+      data: { amount: data.value },
     };
   }
   return raw as StoredEvent<"Deposited", { amount: number }>;

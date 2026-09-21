@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { ReadonlyDeep, StandardSchemaV1 } from "../src/index.js";
 import { ConcurrencyError, ValidationError, validate } from "../src/index.js";
+import { invalidInput } from "./invalid-input.js";
 
 describe("ReadonlyDeep", () => {
   it("enforces deep readonly at type level", () => {
@@ -118,6 +119,23 @@ describe("ConcurrencyError", () => {
     const err = new ConcurrencyError("agg-2", 10);
     expect(err.stack).toBeDefined();
   });
+
+  it("clips control characters and oversized aggregateId in the message", () => {
+    // stream 由来の untrusted 値を message に埋め込む際、改行注入と巨大化を防ぐ。
+    const err = new ConcurrencyError(`line1\nline2\t${"x".repeat(300)}`, 1);
+    expect(err.message).not.toContain("\n");
+    expect(err.message).not.toContain("\t");
+    expect(err.message.length).toBeLessThan(350); // clip 上限 256 + prefix
+    expect(err.message).toContain("\\n"); // escaped 表現として残る
+  });
+
+  it("falls back to <unprintable> when aggregateId's toString throws", () => {
+    // clip の try/catch fallback: Object.create(null) や投げる toString を持つ
+    // malformed 値でも message 構築自体は失敗しない。
+    const unprintable = invalidInput<string>(Object.create(null));
+    const err = new ConcurrencyError(unprintable, 0);
+    expect(err.message).toContain("<unprintable>");
+  });
 });
 
 // Standard Schema conformant test doubles: Zod / Valibot / ArkType に依存せず
@@ -131,7 +149,7 @@ function syncStringSchema(): StandardSchemaV1<unknown, string> {
         typeof value === "string"
           ? { value }
           : { issues: [{ message: "expected string", path: ["root"] }] },
-      types: { input: undefined as unknown, output: "" as string },
+      types: { input: undefined, output: "" },
     },
   };
 }
@@ -143,7 +161,7 @@ function asyncNumberSchema(): StandardSchemaV1<unknown, number> {
       vendor: "test-double-async",
       validate: async (value) =>
         typeof value === "number" ? { value } : { issues: [{ message: "expected number" }] },
-      types: { input: undefined as unknown, output: 0 as number },
+      types: { input: undefined, output: 0 },
     },
   };
 }
@@ -160,8 +178,8 @@ function nestedPathSchema(): StandardSchemaV1<unknown, { user: { name: string } 
         ],
       }),
       types: {
-        input: undefined as unknown,
-        output: { user: { name: "" } } as { user: { name: string } },
+        input: undefined,
+        output: { user: { name: "" } },
       },
     },
   };
@@ -201,6 +219,15 @@ describe("ValidationError", () => {
     const err = new ValidationError(issues);
     expect(err.issues).toBe(issues);
   });
+
+  it("formats malformed (spec-noncompliant) issues without throwing", () => {
+    // vendor が null 要素・非配列 path・非文字列 message を返しても
+    // formatIssue が生 TypeError に落ちないことを保証する。
+    const err = new ValidationError(
+      invalidInput([null, { message: 42, path: "not-an-array" }, { message: "ok" }]),
+    );
+    expect(err.message).toBe("Validation failed: null; 42; ok");
+  });
 });
 
 describe("validate (Standard Schema)", () => {
@@ -238,6 +265,94 @@ describe("validate (Standard Schema)", () => {
     await expect(validate(schema, {})).rejects.toThrow(/0\.items\.3: too short/);
   });
 
+  it("throws TypeError when a schema returns non-array issues", async () => {
+    // Standard Schema 非準拠の schema を防御: 非配列 issues を ValidationError に
+    // 流すと consumer が issues.map 等で生 TypeError を踏む
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ({ issues: "not-an-array" }),
+      },
+    };
+    await expect(validate(invalidInput(bad), "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("throws TypeError when a schema returns neither value nor issues", async () => {
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ({}),
+      },
+    };
+    await expect(validate(invalidInput(bad), "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("throws TypeError when a schema returns a non-object result", async () => {
+    // Standard Schema 非準拠の null / primitive 返却を防御: issues/value の
+    // property access で生 TypeError になるのを防ぐ。
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => null,
+      },
+    };
+    await expect(validate(invalidInput(bad), "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("treats inherited `issues` as failure (prototype 上の失敗情報を成功に変換しない)", async () => {
+    // prototype getter で `issues` を供給し own `value` を持つ非準拠結果を
+    // 成功に誤分類すると、失敗した検証の入力がそのまま通ってしまう。
+    // `issues` が定義されていれば常に失敗側に倒す。
+    const proto = { issues: [{ message: "inherited" }] };
+    const forged = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "forged",
+        validate: () => Object.assign(Object.create(proto), { value: "ok" }),
+      },
+    };
+    await expect(validate(invalidInput(forged), "x")).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("treats own `issues: []` as failure and own `issues: undefined` as success", async () => {
+    // Standard Schema の Result は `{issues}` か `{value}` の判別 union。
+    // `issues` が own property として存在すれば空配列でも failure、
+    // `undefined` 値なら成功側にフォールスルーして `value` を読む。
+    const emptyIssues: StandardSchemaV1 = {
+      "~standard": {
+        version: 1,
+        vendor: "empty-issues",
+        validate: () => ({ issues: [] }),
+      },
+    };
+    await expect(validate(emptyIssues, "x")).rejects.toBeInstanceOf(ValidationError);
+
+    const undefinedIssues: StandardSchemaV1 = {
+      "~standard": {
+        version: 1,
+        vendor: "undefined-issues",
+        validate: () => ({ issues: undefined, value: "ok" }),
+      },
+    };
+    await expect(validate(undefinedIssues, "x")).resolves.toBe("ok");
+  });
+
+  it("throws TypeError when a schema returns an array result", async () => {
+    // 配列は `typeof === "object"` を通るが `{value}`/`{issues}` を持てないため
+    // "non-object result" として弾く (own `issues`/`value` 欠落診断より正確)。
+    const bad = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "bad",
+        validate: () => ["not", "a", "result"],
+      },
+    };
+    await expect(validate(invalidInput(bad), "x")).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("infers Output via InferSchemaOutput from concrete schema", () => {
     // 型レベルのみの regression gate: validate 戻り値が Output に narrow されることを
     // expectTypeOf で compile-time に検証する。runtime assertion は上の happy-path ケースで担保。
@@ -246,5 +361,54 @@ describe("validate (Standard Schema)", () => {
 
     const numberSchema = asyncNumberSchema();
     expectTypeOf(validate(numberSchema, 1)).resolves.toEqualTypeOf<number>();
+  });
+
+  it("throws TypeError for malformed schema shapes (~standard / validate 欠落)", async () => {
+    // `schema["~standard"].validate` の直接参照で生 TypeError に落ちるのを防ぐ。
+    for (const bad of [
+      null,
+      42,
+      "schema",
+      {}, // ~standard 欠落
+      { "~standard": null },
+      { "~standard": [] }, // 配列は validate field を持てない
+      { "~standard": {} }, // validate 欠落
+      { "~standard": { validate: 42 } }, // validate が非関数
+    ]) {
+      await expect(validate(invalidInput(bad), "x")).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("ValidationError formats malformed issues without throwing", () => {
+    const err = new ValidationError(
+      invalidInput([
+        null,
+        "oops",
+        { message: 42 },
+        { message: "ok", path: "not-an-array" },
+        { message: "deep", path: [{ key: 1 }] },
+        { path: [{ key: "x" }] },
+      ]),
+    );
+    expect(err.name).toBe("ValidationError");
+    expect(err.message).toContain("null");
+    expect(err.message).toContain("oops");
+    expect(err.message).toContain("42");
+    expect(err.message).toContain("ok");
+    expect(err.message).toContain("1: deep");
+    expect(err.message).toContain("x: undefined");
+    expect(err.issues).toHaveLength(6);
+  });
+
+  it("ValidationError truncates message at 2048 chars (details kept on issues)", () => {
+    const issues = Array.from({ length: 200 }, (_, i) => ({
+      message: `issue-${i}-${"x".repeat(50)}`,
+    }));
+    const err = new ValidationError(issues);
+    // 本体は 2048 文字で切り詰められ、issue 数の suffix が付く (全情報は issues に保持)
+    expect(err.message.length).toBeLessThan(2100);
+    expect(err.message).toContain("(200 issues total)");
+    expect(err.issues).toBe(issues);
+    expect(err.issues).toHaveLength(200);
   });
 });

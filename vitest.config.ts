@@ -20,14 +20,14 @@ export default defineConfig({
       reporter: ["text", "json-summary", "html"],
       // 後退を CI で検出する閾値 (DEC-024 / CTeO・COO 指摘)。
       // unit-only 計測のため DynamoEventStore / DynamoSnapshotStore (event-store/dynamo/*) は
-      // integration test 側でカバーされ unit では低めに出る。特に functions は integration-only の
-      // method (loadFrom / snapshot load・save 等) が押し下げるため低めの下限とする。
-      // 現状値 (stmts 86 / branch 91 / func 78 / lines 86) に余裕を持たせた下限。
+      // integration test 側でカバーされ unit では低めに出る。現状値
+      // (stmts 98 / branch 98 / func 100 / lines 98) に余裕を持たせた下限とし、
+      // 残りの未カバー分は実 SDK 到達不能の defense-in-depth 分岐である前提とする。
       thresholds: {
-        statements: 78,
-        branches: 78,
-        functions: 72,
-        lines: 78,
+        statements: 90,
+        branches: 90,
+        functions: 85,
+        lines: 90,
       },
     },
     projects: [

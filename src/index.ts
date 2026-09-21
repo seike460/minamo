@@ -1,4 +1,5 @@
-export { executeCommand, rehydrate } from "./command/execute.js";
+export { executeCommand } from "./command/execute.js";
+export { rehydrate } from "./command/rehydrate.js";
 export { createCommandRunner } from "./command/runner.js";
 export type { CommandHandler, CommandResult } from "./command/types.js";
 export type { Aggregate, AggregateConfig } from "./core/aggregate.js";

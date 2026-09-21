@@ -4,6 +4,10 @@
  * tuple の length・位置別型・variadic 構造は保持し、関数型はそのまま通す。
  * 通常の配列は `ReadonlyArray` に変換される。
  *
+ * 対象は plain object / array に限る。`Map` / `Set` / `Date` / typed array 等は
+ * object 分岐に落ちるが mutator method (`set` / `add` 等) は readonly 化されず
+ * readonly 契約をすり抜ける (DEC-011 が state/data を plain data に限定する理由の一つ)。
+ *
  * @example
  * ```ts
  * type T = ReadonlyDeep<{ a: { b: number }; c: [string, number[]] }>;

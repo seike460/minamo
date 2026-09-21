@@ -3,10 +3,11 @@ import type { EventMap, EventStore } from "../../src/index.js";
 import { ConcurrencyError, EventLimitError } from "../../src/index.js";
 
 /**
- * Event Store Contract Tests (CT-01 〜 CT-13)。
+ * Event Store Contract Tests (CT-01 〜 CT-15: 振る舞い系)。
  *
  * 単一 suite を InMemoryEventStore と DynamoEventStore の両方で実行し、
  * concept.md §1 痛み C (InMemory と本番の振る舞い差異) を構造的に抑え込む。
+ * 入力拒否系 (CT-16〜24) は contract/event-store-validation.ts に分離。
  *
  * 呼び出し側が以下を提供する:
  * - `label`: describe ブロックの識別名 (例: "InMemoryEventStore", "DynamoEventStore")
@@ -87,6 +88,8 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       await expect(
         store.append(aggregateId, [{ type: "Incremented", data: { amount: 2 } }], 5),
       ).rejects.toBeInstanceOf(ConcurrencyError);
+      // 失敗した append は stream に何も残さない (atomicity)
+      expect(await store.load(aggregateId)).toHaveLength(1);
     });
 
     it("CT-05 append with expectedVersion behind real stream throws ConcurrencyError", async () => {
@@ -97,6 +100,7 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       await expect(
         store.append(aggregateId, [{ type: "Incremented", data: { amount: 3 } }], 0),
       ).rejects.toBeInstanceOf(ConcurrencyError);
+      expect(await store.load(aggregateId)).toHaveLength(2);
     });
 
     it("CT-06 append with empty events array throws EventLimitError", async () => {
@@ -152,13 +156,25 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       const cid = "corr-abc";
       const appended = await store.append(
         aggregateId,
-        [{ type: "Incremented", data: { amount: 1 } }],
+        [
+          { type: "Incremented", data: { amount: 1 } },
+          { type: "Incremented", data: { amount: 2 } },
+        ],
         0,
         { correlationId: cid },
       );
-      expect(appended[0]?.correlationId).toBe(cid);
+      // batch 内の全 stored event に付くこと (一部だけ付ける実装でも pass しないよう)。
+      // 件数も確認する — append が空配列を返す不具合では loop 内 assertion が
+      // 一度も実行されず green になる。
+      expect(appended).toHaveLength(2);
+      for (const ev of appended) {
+        expect(ev.correlationId).toBe(cid);
+      }
       const loaded = await store.load(aggregateId);
-      expect(loaded[0]?.correlationId).toBe(cid);
+      expect(loaded).toHaveLength(2);
+      for (const ev of loaded) {
+        expect(ev.correlationId).toBe(cid);
+      }
     });
 
     it("CT-11 append without options omits correlationId (property absent)", async () => {
@@ -166,12 +182,21 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       const aggregateId = "agg-11";
       const appended = await store.append(
         aggregateId,
-        [{ type: "Incremented", data: { amount: 1 } }],
+        [
+          { type: "Incremented", data: { amount: 1 } },
+          { type: "Incremented", data: { amount: 2 } },
+        ],
         0,
       );
-      expect(Object.hasOwn(appended[0] ?? {}, "correlationId")).toBe(false);
+      expect(appended).toHaveLength(2);
+      for (const ev of appended) {
+        expect(Object.hasOwn(ev, "correlationId")).toBe(false);
+      }
       const loaded = await store.load(aggregateId);
-      expect(Object.hasOwn(loaded[0] ?? {}, "correlationId")).toBe(false);
+      expect(loaded).toHaveLength(2);
+      for (const ev of loaded) {
+        expect(Object.hasOwn(ev, "correlationId")).toBe(false);
+      }
     });
 
     it("CT-12 fresh-read: load observes the just-completed append", async () => {
@@ -196,7 +221,9 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
 
     it("CT-14 loadFrom returns only events after the given version (when supported)", async () => {
       const store = await makeStore();
-      // loadFrom は optional method (DEC-019)。未実装の store はこの契約の対象外。
+      // loadFrom は optional method (DEC-019)。組み込み両実装は提供するため、
+      // 未実装のまま黙って pass しないよう存在自体も assert する。
+      expect(store.loadFrom).toBeTypeOf("function");
       if (typeof store.loadFrom !== "function") return;
       const aggregateId = "agg-14";
       await store.append(
@@ -211,6 +238,22 @@ export function registerEventStoreContract(ctx: ContractContext<CounterEvents>):
       expect((await store.loadFrom(aggregateId, 0)).map((e) => e.version)).toEqual([1, 2, 3]);
       expect((await store.loadFrom(aggregateId, 1)).map((e) => e.version)).toEqual([2, 3]);
       expect((await store.loadFrom(aggregateId, 3)).map((e) => e.version)).toEqual([]);
+    });
+
+    it("CT-15 mutation isolation: caller 側の変更が stored event に及ばない", async () => {
+      const store = await makeStore();
+      const aggregateId = "agg-15";
+      const data = { amount: 5 };
+      await store.append(aggregateId, [{ type: "Incremented", data }], 0);
+      // append に渡したオブジェクトを caller 側で改変 → stored event に影響しないこと
+      data.amount = 999;
+      expect((await store.load(aggregateId))[0]?.data).toEqual({ amount: 5 });
+      // load 結果を改変しても再 load で元の値が返ること (live 参照を共有しない)
+      const loaded = await store.load(aggregateId);
+      const loadedData = loaded[0]?.data;
+      if (loadedData === undefined) throw new Error("expected stored data");
+      loadedData.amount = -1;
+      expect((await store.load(aggregateId))[0]?.data).toEqual({ amount: 5 });
     });
   });
 }

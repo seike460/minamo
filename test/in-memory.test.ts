@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryEventStore } from "../src/index.js";
+import { EventLimitError, InMemoryEventStore } from "../src/index.js";
 import { type CounterEvents, registerEventStoreContract } from "./contract/event-store.js";
+import { registerEventStoreValidationContract } from "./contract/event-store-validation.js";
+import { invalidInput } from "./invalid-input.js";
 
 /**
- * U4 Contract Tests (CT-01〜13) を InMemoryEventStore 対象で実行。
+ * U4 Contract Tests (CT-01〜22) を InMemoryEventStore 対象で実行。
  * 同一 suite が U8 DynamoEventStore でも走ることで concept.md §1 痛み C
  * (InMemory と本番の振る舞い差異) を構造的に抑える。
  */
 registerEventStoreContract({
+  label: "InMemoryEventStore",
+  makeStore: async () => new InMemoryEventStore<CounterEvents>(),
+});
+registerEventStoreValidationContract({
   label: "InMemoryEventStore",
   makeStore: async () => new InMemoryEventStore<CounterEvents>(),
 });
@@ -101,5 +107,17 @@ describe("InMemoryEventStore — unit-specific tests", () => {
     const bLoaded = await store.load("agg-B");
     expect(aLoaded.map((e) => e.version)).toEqual([1, 2]);
     expect(bLoaded).toEqual([]);
+  });
+
+  it("CT-InMem-08 loadFrom returns [] for an unknown aggregate", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    expect(await store.loadFrom("agg-missing", 0)).toEqual([]);
+  });
+
+  it("CT-InMem-09 non-array events input is rejected with EventLimitError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    await expect(store.append("agg-1", invalidInput("not-an-array"), 0)).rejects.toBeInstanceOf(
+      EventLimitError,
+    );
   });
 });

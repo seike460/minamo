@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,22 +14,50 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-test:
+  audit:
+    # lockfile の既知脆弱性を検査する。dependabot は既存依存の更新を追うが、
+    # PR 起因の新規脆弱依存を含め lockfile 全体の後退はここで止める。
+    # (dependency-review-action は repo の dependency graph 有効化が前提のため不使用)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [24]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
         with:
-          version: 10
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies (moderate+)
+        run: pnpm audit --audit-level=moderate
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        # engines >=24: 最新 LTS と current の両方で検証し、
+        # 次期ランタイムとの前方互換を早期に検出する
+        node: [24, 25]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -49,7 +78,10 @@ jobs:
         run: pnpm run build
 
       - name: Verify instanceof invariants
-        run: node scripts/verify-instanceof.mjs
+        run: pnpm run check-instanceof
+
+      - name: Verify optional peer isolation (import without AWS SDK)
+        run: pnpm run check-optional-peer
 
       - name: Check exports (attw + publint)
         run: pnpm run check-exports
@@ -60,8 +92,19 @@ jobs:
       - name: Generate API reference (typedoc, warnings-as-errors)
         run: pnpm run docs
 
+      - name: Upload coverage report
+        # matrix の両脚で同一内容になるため node 24 のみで 1 回だけ上げる
+        if: matrix.node == 24
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: error
+
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: build-and-test
     services:
       dynamodb:
@@ -70,16 +113,15 @@ jobs:
         ports:
           - 8000:8000
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
         with:
-          version: 10
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm

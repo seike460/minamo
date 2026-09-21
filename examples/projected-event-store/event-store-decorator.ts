@@ -33,6 +33,13 @@ export class ProjectedEventStore<TMap extends EventMap> implements EventStore<TM
   readonly #inner: EventStore<TMap>;
   readonly #onAppended: ProjectionCallback<TMap>;
   readonly #onAppendedError: ProjectionErrorCallback | undefined;
+  // inner が optional method `loadFrom` を実装していれば透過的に delegate する。
+  // 持ち越さないと snapshot 起点の部分 rehydration (concept.md §5.10) が
+  // executeCommand 側で load() 全件 + filter に静かに退化する。
+  readonly loadFrom?: (
+    aggregateId: string,
+    afterVersion: number,
+  ) => Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 
   constructor(
     inner: EventStore<TMap>,
@@ -42,6 +49,9 @@ export class ProjectedEventStore<TMap extends EventMap> implements EventStore<TM
     this.#inner = inner;
     this.#onAppended = onAppended;
     this.#onAppendedError = onAppendedError;
+    if (inner.loadFrom) {
+      this.loadFrom = inner.loadFrom.bind(inner);
+    }
   }
 
   async append(

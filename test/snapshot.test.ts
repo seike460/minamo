@@ -1,13 +1,30 @@
 import { describe, expect, it } from "vitest";
 import type {
+  AggregateConfig,
   AppendOptions,
+  CommandHandler,
   EventStore,
   EventsOf,
   ExecuteObserver,
+  Snapshot,
+  SnapshotStore,
   StoredEventsOf,
 } from "../src/index.js";
-import { executeCommand, InMemoryEventStore, InMemorySnapshotStore } from "../src/index.js";
+import {
+  executeCommand,
+  InMemoryEventStore,
+  InMemorySnapshotStore,
+  InvalidEventStreamError,
+  RetryExhaustedError,
+} from "../src/index.js";
 import { type CounterEvents, counterConfig, incrementHandler } from "./fixtures/counter.js";
+import { invalidInput } from "./invalid-input.js";
+
+/** caught error を InvalidEventStreamError に narrow する (cast ではなく検査)。 */
+function assertInvalidStreamError(err: unknown): InvalidEventStreamError {
+  if (!(err instanceof InvalidEventStreamError)) throw err;
+  return err;
+}
 
 /**
  * executeCommand の Snapshot 統合 (concept.md §5.10, DEC-019)。
@@ -57,6 +74,57 @@ class LoadFromStore implements EventStore<CounterEvents> {
   }
 }
 
+/** save が常に reject する SnapshotStore double (DEC-026: snapshot save は best-effort)。 */
+class FailingSaveSnapshotStore implements SnapshotStore<number> {
+  saveCalls = 0;
+  async load(): Promise<Snapshot<number> | null> {
+    return null;
+  }
+  async save(): Promise<void> {
+    this.saveCalls += 1;
+    throw new Error("snapshot backend unavailable");
+  }
+}
+
+/** 固定の snapshot を返す store double (custom SnapshotStore の契約違反を注入する)。 */
+class StubSnapshotStore implements SnapshotStore<number> {
+  constructor(private readonly snap: Snapshot<number>) {}
+  async load(): Promise<Snapshot<number> | null> {
+    return this.snap;
+  }
+  async save(): Promise<void> {}
+}
+
+/** loadFrom が truthy だが関数ではない store double (型違反入力。fallback 経路の検証用)。 */
+class NonFunctionLoadFromStore implements EventStore<CounterEvents> {
+  readonly #inner = new InMemoryEventStore<CounterEvents>();
+  loadCalls = 0;
+  // interface 上は optional method だが、custom store が誤って非関数を生やすケースを模擬
+  readonly loadFrom = invalidInput({});
+
+  append(
+    aggregateId: string,
+    events: ReadonlyArray<EventsOf<CounterEvents>>,
+    expectedVersion: number,
+    options?: AppendOptions,
+  ): Promise<ReadonlyArray<StoredEventsOf<CounterEvents>>> {
+    return this.#inner.append(aggregateId, events, expectedVersion, options);
+  }
+
+  async load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<CounterEvents>>> {
+    this.loadCalls += 1;
+    return this.#inner.load(aggregateId);
+  }
+
+  seed(aggregateId: string, amount: number, expectedVersion: number) {
+    return this.#inner.append(
+      aggregateId,
+      [{ type: "Incremented", data: { amount } }],
+      expectedVersion,
+    );
+  }
+}
+
 describe("executeCommand + Snapshot", () => {
   it("snapshotPolicy.everyNEvents を跨いだら snapshot を save する", async () => {
     const store = new InMemoryEventStore<CounterEvents>();
@@ -78,6 +146,85 @@ describe("executeCommand + Snapshot", () => {
     const snap = await snapshots.load("snap-1");
     expect(snap?.version).toBe(2); // 2 を跨いだ時点で save、3 は跨がない
     expect(snap?.state).toBe(2);
+  });
+
+  it("state の own property が undefined を含んでも command が失敗しない (snapshot 閾値到達で stuck しない)", async () => {
+    // 回帰: `{ closedAt: undefined }` のような state (exactOptionalPropertyTypes 無しの
+    // consumer では型上合法) は v0.2.0 で受理されていた。snapshot 発火のたびに
+    // commit 前検証で弾くと、stream 0 件のまま aggregate が恒久的に command 不能に
+    // なる。snapshot state の persist 側で undefined 値 key を strip する
+    // (removeUndefinedValues parity) ので、command は繰り返し成功しなければならない。
+    type JobState = { count: number; closedAt?: string | undefined };
+    const jobConfig: AggregateConfig<JobState, CounterEvents> = {
+      // initialState に `closedAt: undefined` の own key を持たせる (元の再現条件)。
+      // rehydrate の normalizePlainData で strip され、state は {count: 0} になる。
+      initialState: { count: 0, closedAt: undefined },
+      evolve: {
+        Incremented: (state, data) => ({ ...state, count: state.count + data.amount }),
+      },
+    };
+    const openHandler: CommandHandler<JobState, CounterEvents, { amount: number }> = (
+      _agg,
+      input,
+    ) => [{ type: "Incremented", data: { amount: input.amount } }];
+
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<JobState>();
+    const params = {
+      config: jobConfig,
+      store,
+      handler: openHandler,
+      aggregateId: "job-1",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    };
+
+    // 2 回連続で成功する (1 回目で snapshot 閾値到達 → save 後、2 回目は snapshot 経路で replay)
+    const r1 = await executeCommand(params);
+    const r2 = await executeCommand(params);
+    expect(r1.aggregate.state).toEqual({ count: 1 });
+    expect(r2.aggregate.state).toEqual({ count: 2 });
+    expect(await store.load("job-1")).toHaveLength(2);
+    // snapshot も保存される (state 内の undefined 値 key は strip 済み)
+    const snap = await snapshots.load("job-1");
+    expect(snap?.version).toBe(2);
+    expect(snap?.state).toEqual({ count: 2 });
+  });
+
+  it("evolve が undefined 値を持つ own key を返しても command は成功し、永続化・snapshot で strip される", async () => {
+    // evolve の戻り値 `{ count, closedAt: undefined }` は persist 正規化で
+    // `closedAt` ごと落ちる。caller に返る aggregate.state は evolve の戻り値
+    // そのまま (v0.2.0 と同じく own key が値 undefined で残る)。
+    type JobState = { count: number; closedAt?: string | undefined };
+    const jobConfig: AggregateConfig<JobState, CounterEvents> = {
+      initialState: { count: 0, closedAt: undefined },
+      evolve: {
+        Incremented: (state, data) => ({
+          count: state.count + data.amount,
+          closedAt: undefined,
+        }),
+      },
+    };
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<JobState>();
+    const result = await executeCommand({
+      config: jobConfig,
+      store,
+      handler: (_agg, input: { amount: number }) => [
+        { type: "Incremented", data: { amount: input.amount } },
+      ],
+      aggregateId: "job-2",
+      input: { amount: 3 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    });
+    // caller に返る state は evolve の戻り値そのまま (v0.2.0 と同じく own key
+    // `closedAt` が値 undefined で残る)。strip が掛かるのは永続化面のみ。
+    expect(result.aggregate.state).toEqual({ count: 3 });
+    expect(Object.hasOwn(result.aggregate.state, "closedAt")).toBe(true);
+    // snapshot は strip 済みの形で保存される (reload で見える形と一致)
+    expect(await snapshots.load("job-2")).toMatchObject({ state: { count: 3 } });
   });
 
   it("snapshot 経路で replay 件数 (onLoaded.eventCount) が減る", async () => {
@@ -189,5 +336,504 @@ describe("executeCommand + Snapshot", () => {
 
     expect(seenState).toBe(100); // snapshot.state が起点 (full replay の 3 ではない)
     expect(result.aggregate.state).toBe(101);
+  });
+
+  it("snapshot save が失敗しても command は成功しイベントは commit される (best-effort, DEC-026)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new FailingSaveSnapshotStore();
+
+    // everyNEvents=1 で version 1 を跨ぐため save を試みる → reject されるが握りつぶす。
+    const result = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "snap-fail",
+      input: { amount: 5 },
+      snapshotStore: snapshots,
+      snapshotPolicy: { everyNEvents: 1 },
+    });
+
+    expect(snapshots.saveCalls).toBe(1); // save は確かに試行された
+    expect(result.aggregate.state).toBe(5); // save 失敗にもかかわらず command は正常完了
+    expect(result.aggregate.version).toBe(1);
+    expect(result.newEvents).toHaveLength(1);
+    // append は commit 済み: 再 load でイベントが残っている (= 二重書き込み hazard を防ぐ)
+    expect(await store.load("snap-fail")).toHaveLength(1);
+  });
+
+  it("custom SnapshotStore が契約違反の snapshot を返したら TypeError (strict)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-s", [{ type: "Incremented", data: { amount: 1 } }], 0);
+
+    const cases: Array<Snapshot<number>> = [
+      // 別 aggregate の snapshot → 別 state 起点の replay = silent corruption
+      { aggregateId: "other", version: 1, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      // NaN / 非整数 / 0 以下の version → loadFrom(NaN) は空を返し version が壊れる
+      {
+        aggregateId: "agg-s",
+        version: Number.NaN,
+        state: 0,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      { aggregateId: "agg-s", version: 0, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      { aggregateId: "agg-s", version: 1.5, state: 0, timestamp: "2026-01-01T00:00:00.000Z" },
+      // state 欠落 / undefined (own property 存在だけでは弾けない)
+      invalidInput<Snapshot<number>>({
+        aggregateId: "agg-s",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      }),
+      invalidInput<Snapshot<number>>({
+        aggregateId: "agg-s",
+        version: 1,
+        state: undefined,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      }),
+      // null 以外の非 object (undefined) を返す契約違反
+      invalidInput<Snapshot<number>>(undefined),
+      // 配列・primitive も Snapshot shape ではない (field アクセスの誤診断を防ぐ)
+      invalidInput<Snapshot<number>>([]),
+      invalidInput<Snapshot<number>>(42),
+    ];
+
+    for (const snap of cases) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-s",
+          input: { amount: 1 },
+          snapshotStore: new StubSnapshotStore(snap),
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("custom SnapshotStore が prototype getter の state を持つ class instance Snapshot を返しても受理する (loadFrom 有/無)", async () => {
+    // Snapshot は interface のため、class instance (getter を prototype に持つ) でも
+    // 実装できる。`get state()` は own property ではないため、存在判定に
+    // Object.hasOwn を使うと正当な返り値を拒否してしまう。
+    class GetterSnapshot implements Snapshot<number> {
+      constructor(
+        readonly aggregateId: string,
+        readonly version: number,
+        readonly timestamp: string,
+        private readonly inner: number,
+      ) {}
+      get state(): number {
+        return this.inner;
+      }
+    }
+    const snapshots = new StubSnapshotStore(
+      new GetterSnapshot("agg-getter", 1, "2026-01-01T00:00:00.000Z", 10),
+    );
+
+    // loadFrom 実装 store: snapshot(v1, state=10) + tail(v2: +5) + handler(+1) = 16
+    const withLoadFrom = new LoadFromStore();
+    await withLoadFrom.seed("agg-getter", 0, 0);
+    await withLoadFrom.seed("agg-getter", 5, 1);
+    const r1 = await executeCommand({
+      config: counterConfig,
+      store: withLoadFrom,
+      handler: incrementHandler,
+      aggregateId: "agg-getter",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+    expect(r1.aggregate.state).toBe(16);
+    expect(withLoadFrom.loadFromCalls).toBe(1);
+    expect(withLoadFrom.lastAfterVersion).toBe(1);
+
+    // loadFrom 未実装 store: full load + filter 経路でも同じ結果。
+    // InMemoryEventStore は loadFrom を持つため、load/append だけを委譲する
+    // wrapper で「loadFrom を持たない」store を作る。
+    const inner = new InMemoryEventStore<CounterEvents>();
+    let plainLoadCalls = 0;
+    const plain: EventStore<CounterEvents> = {
+      load: async (aggregateId: string) => {
+        plainLoadCalls += 1;
+        return inner.load(aggregateId);
+      },
+      append: (aggregateId, events, expectedVersion, options) =>
+        inner.append(aggregateId, events, expectedVersion, options),
+    };
+    await plain.append("agg-getter", [{ type: "Incremented", data: { amount: 0 } }], 0);
+    await plain.append("agg-getter", [{ type: "Incremented", data: { amount: 5 } }], 1);
+    const r2 = await executeCommand({
+      config: counterConfig,
+      store: plain,
+      handler: incrementHandler,
+      aggregateId: "agg-getter",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+    expect(r2.aggregate.state).toBe(16);
+    expect(plainLoadCalls).toBe(1); // full load 経路 (loadFrom は存在しない)
+
+    // getter が undefined を返す場合はこれまで通り拒否される (state 欠落扱い)
+    class UndefinedStateSnapshot implements Snapshot<number> {
+      readonly aggregateId = "agg-getter";
+      readonly version = 1;
+      readonly timestamp = "2026-01-01T00:00:00.000Z";
+      get state(): number {
+        return invalidInput(undefined);
+      }
+    }
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: new InMemoryEventStore<CounterEvents>(),
+        handler: incrementHandler,
+        aggregateId: "agg-getter",
+        input: { amount: 1 },
+        snapshotStore: new StubSnapshotStore(new UndefinedStateSnapshot()),
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    // 汚染した prototype の inherited data property は受理しない:
+    // `in` 演算子の素朴な存在判定だと `Object.create({state})` / `__proto__`
+    // 代入で供給した state が通ってしまう。handler/append 未到達で TypeError。
+    const pollutedViaCreate = Object.assign(Object.create({ state: 100 }), {
+      aggregateId: "agg-getter",
+      version: 1,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    const pollutedViaProto = {
+      aggregateId: "agg-getter",
+      version: 1,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+    Object.setPrototypeOf(pollutedViaProto, { state: 100 });
+    for (const polluted of [pollutedViaCreate, pollutedViaProto]) {
+      let handlerCalls = 0;
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store: new InMemoryEventStore<CounterEvents>(),
+          handler: (agg, input: { amount: number }) => {
+            handlerCalls += 1;
+            return incrementHandler(agg, input);
+          },
+          aggregateId: "agg-getter",
+          input: { amount: 1 },
+          snapshotStore: new StubSnapshotStore(invalidInput(polluted)),
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(handlerCalls).toBe(0);
+    }
+
+    // state 以外の必須 field (aggregateId / version / timestamp) も同じく、
+    // inherited data property で供給された場合は欠落として拒否する。
+    const fullFields = {
+      aggregateId: "agg-getter",
+      version: 1,
+      state: 100,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+    for (const field of ["aggregateId", "version", "timestamp"] as const) {
+      const { [field]: onProto, ...rest } = fullFields;
+      const partial = Object.assign(Object.create({ [field]: onProto }), rest);
+      let handlerCalls = 0;
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store: new InMemoryEventStore<CounterEvents>(),
+          handler: (agg, input: { amount: number }) => {
+            handlerCalls += 1;
+            return incrementHandler(agg, input);
+          },
+          aggregateId: "agg-getter",
+          input: { amount: 1 },
+          snapshotStore: new StubSnapshotStore(invalidInput(partial)),
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(handlerCalls).toBe(0);
+    }
+
+    // `Object.prototype.get` が callable に汚染されていても inherited data property を
+    // 拒否する: descriptor の `get` は prototype 経由で読めるため、
+    // `desc.get !== undefined` だと data property を getter と誤認する迂回があった。
+    // 汚染中は ToPropertyDescriptor が継承 `get` を拾い `Object.defineProperty` が
+    // 壊れるため、汚染ウィンドウ内では expect() を呼ばず素の try/catch で捕捉する。
+    const originalGet = Object.getOwnPropertyDescriptor(Object.prototype, "get");
+    Object.defineProperty(Object.prototype, "get", {
+      value: () => {},
+      writable: true,
+      configurable: true,
+    });
+    let handlerCalls = 0;
+    let pollutedError: unknown;
+    try {
+      await executeCommand({
+        config: counterConfig,
+        store: new InMemoryEventStore<CounterEvents>(),
+        handler: (agg, input: { amount: number }) => {
+          handlerCalls += 1;
+          return incrementHandler(agg, input);
+        },
+        aggregateId: "agg-getter",
+        input: { amount: 1 },
+        snapshotStore: new StubSnapshotStore(invalidInput(pollutedViaCreate)),
+      });
+    } catch (e) {
+      pollutedError = e;
+    } finally {
+      if (originalGet === undefined) {
+        Reflect.deleteProperty(Object.prototype, "get");
+      } else {
+        Object.defineProperty(Object.prototype, "get", originalGet);
+      }
+    }
+    expect(pollutedError).toBeInstanceOf(TypeError);
+    expect(handlerCalls).toBe(0);
+  });
+
+  it("loadFrom が非関数 (truthy) でも full load + filter に fallback する", async () => {
+    const store = new NonFunctionLoadFromStore();
+    const snapshots = new InMemorySnapshotStore<number>();
+
+    await store.seed("agg-nf", 10, 0);
+    await snapshots.save({
+      aggregateId: "agg-nf",
+      version: 1,
+      state: 10,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await store.seed("agg-nf", 5, 1);
+
+    const result = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "agg-nf",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+
+    // typeof 判定で fallback → load 全件 + filter。snapshot.state(10) + tail(5) + handler(1) = 16
+    expect(result.aggregate.state).toBe(16);
+    expect(store.loadCalls).toBe(1);
+  });
+
+  it("snapshot.version > stream head → append の ConditionCheck が ConcurrencyError → RetryExhaustedError", async () => {
+    // snapshot が stream より進んでいる破損状態: retry しても解消しないため枯渇で fail-loud。
+    const store = new InMemoryEventStore<CounterEvents>();
+    await store.append("agg-stale", [{ type: "Incremented", data: { amount: 1 } }], 0);
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-stale",
+      version: 5, // stream head (1) より進んでいる
+      state: 99,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-stale",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+        maxRetries: 2,
+      }),
+    ).rejects.toBeInstanceOf(RetryExhaustedError);
+  });
+
+  it("snapshot 以降の tail に version gap がある → InvalidEventStreamError (version_gap)", async () => {
+    // snapshot.version=3 の直後に version=5 が来る破損 stream (loadFrom で [5] が返る)。
+    const gapTail: StoredEventsOf<CounterEvents> = {
+      version: 5,
+      aggregateId: "agg-gap",
+      type: "Incremented",
+      data: { amount: 7 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+    const store: EventStore<CounterEvents> = {
+      load: () => Promise.resolve([gapTail]),
+      loadFrom: (_id: string, _v: number) => Promise.resolve([gapTail]),
+      // replay が version_gap で失敗するため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-gap",
+      version: 3,
+      state: 30,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    const err: unknown = await executeCommand({
+      config: counterConfig,
+      store,
+      handler: incrementHandler,
+      aggregateId: "agg-gap",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(assertInvalidStreamError(err).reason).toBe("version_gap");
+  });
+
+  it("loadFrom が非配列を返す → TypeError", async () => {
+    const store = {
+      load: () => Promise.resolve([]),
+      loadFrom: () => Promise.resolve({ length: 1 }),
+      // loadFrom の返り値検証で失敗するため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-na",
+      version: 1,
+      state: 0,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: invalidInput(store),
+        handler: incrementHandler,
+        aggregateId: "agg-na",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("fallback filter 経路で malformed 要素 (version 欠落) → TypeError", async () => {
+    // loadFrom 未実装の store が version 欠落の要素を返すと、filter が e.version に
+    // 触れる前に fail-loud する (生 TypeError や静かな drop ではなく契約違反)。
+    const malformed = {
+      aggregateId: "agg-mf",
+      type: "Incremented",
+      data: { amount: 1 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+      // version 欠落
+    };
+    const store = {
+      load: () => Promise.resolve([malformed]),
+      // filter 経路の検証が目的のため append には到達しないが、
+      // EventStore contract 上は必須のため stub を置く。
+      append: () => Promise.resolve([]),
+    };
+    const snapshots = new InMemorySnapshotStore<number>();
+    await snapshots.save({
+      aggregateId: "agg-mf",
+      version: 1,
+      state: 0,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store: invalidInput(store),
+        handler: incrementHandler,
+        aggregateId: "agg-mf",
+        input: { amount: 1 },
+        snapshotStore: snapshots,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("snapshotPolicy.everyNEvents が非有限数 → TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-nan",
+          input: { amount: 1 },
+          snapshotStore: new InMemorySnapshotStore<number>(),
+          snapshotPolicy: { everyNEvents: bad },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("onCommitted が throw しても閾値到達済みの snapshot save は試行される", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<number>();
+    await store.append("agg-oc", [{ type: "Incremented", data: { amount: 1 } }], 0);
+    // version 1→2 で everyNEvents: 2 の閾値を跨ぐ → snapshot save 対象
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-oc",
+        input: { amount: 1 },
+        observer: {
+          onCommitted: () => {
+            throw new Error("observer exploded");
+          },
+        },
+        snapshotStore: snapshots,
+        snapshotPolicy: { everyNEvents: 2 },
+      }),
+    ).rejects.toThrow("observer exploded");
+    // observer の失敗にもかかわらず snapshot は保存されている (finally 経路)
+    expect(await snapshots.load("agg-oc")).not.toBeNull();
+  });
+
+  it("custom SnapshotStore が非文字列 timestamp の snapshot を返したら TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    for (const badTimestamp of [undefined, 123, null]) {
+      const badSnapshots = {
+        async load() {
+          return {
+            aggregateId: "agg-ts",
+            version: 1,
+            state: 0,
+            timestamp: badTimestamp,
+          };
+        },
+        async save() {},
+        async clear() {},
+      };
+      await expect(
+        executeCommand({
+          config: counterConfig,
+          store,
+          handler: incrementHandler,
+          aggregateId: "agg-ts",
+          input: { amount: 1 },
+          snapshotStore: invalidInput(badSnapshots),
+          snapshotPolicy: { everyNEvents: 1 },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it("custom SnapshotStore が非 cloneable な state を返したら TypeError", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const badSnapshots = {
+      async load() {
+        return {
+          aggregateId: "agg-nc",
+          version: 1,
+          state: { fn: () => 1 },
+          timestamp: "2026-04-17T00:00:00.000Z",
+        };
+      },
+      async save() {},
+      async clear() {},
+    };
+    await expect(
+      executeCommand({
+        config: counterConfig,
+        store,
+        handler: incrementHandler,
+        aggregateId: "agg-nc",
+        input: { amount: 1 },
+        snapshotStore: invalidInput(badSnapshots),
+        snapshotPolicy: { everyNEvents: 1 },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });

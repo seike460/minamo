@@ -3,9 +3,11 @@ import type { AggregateConfig, StoredEvent, Upcaster } from "../src/index.js";
 import {
   executeCommand,
   InMemoryEventStore,
+  InMemorySnapshotStore,
   InvalidEventStreamError,
   rehydrate,
 } from "../src/index.js";
+import { invalidInput } from "./invalid-input.js";
 
 /**
  * upcasting hook (concept.md §5.11, DEC-020) — consumer 所有の transform で旧スキーマイベントを
@@ -14,20 +16,54 @@ import {
 
 // 現行スキーマ: "Incremented" のみ。旧スキーマ "Added" を upcast で吸収する。
 type CounterEvents = { Incremented: { amount: number } };
+type StoredIncremented = StoredEvent<"Incremented", { amount: number }>;
+
+/**
+ * upcast の pass-through 用: raw が現行 "Incremented" event であることを
+ * shape 検査で narrow する (出力値への cast ではなく検査で型を確かめる)。
+ */
+function asIncremented(raw: StoredEvent<string, unknown>): StoredIncremented {
+  const data: unknown = raw.data;
+  if (
+    raw.type !== "Incremented" ||
+    typeof data !== "object" ||
+    data === null ||
+    !("amount" in data) ||
+    typeof data.amount !== "number"
+  ) {
+    throw new TypeError('"Incremented" event is malformed');
+  }
+  return { ...raw, type: "Incremented", data: { amount: data.amount } };
+}
+
+/** caught error を InvalidEventStreamError に narrow する (cast ではなく検査)。 */
+function assertInvalidStreamError(err: unknown): InvalidEventStreamError {
+  if (!(err instanceof InvalidEventStreamError)) throw err;
+  return err;
+}
 
 /** 旧 "Added"({value}) → 現行 "Incremented"({amount})。メタデータ(aggregateId/version/timestamp)は保持。 */
 const upcast: Upcaster<CounterEvents> = (raw) => {
   if (raw.type === "Added") {
-    const { value } = raw.data as { value: number };
+    // legacy payload は型の外の入力。読む前に shape を検査する。
+    const data: unknown = raw.data;
+    if (
+      typeof data !== "object" ||
+      data === null ||
+      !("value" in data) ||
+      typeof data.value !== "number"
+    ) {
+      throw new TypeError('legacy "Added" event payload is malformed');
+    }
     return {
       aggregateId: raw.aggregateId,
       version: raw.version,
       timestamp: raw.timestamp,
       type: "Incremented",
-      data: { amount: value },
+      data: { amount: data.value },
     };
   }
-  return raw as StoredEvent<"Incremented", { amount: number }>;
+  return asIncremented(raw);
 };
 
 const configWithUpcast: AggregateConfig<number, CounterEvents> = {
@@ -42,7 +78,7 @@ const configNoUpcast: AggregateConfig<number, CounterEvents> = {
 };
 
 /** 旧スキーマと新スキーマが混在した stream (load が返す形を模擬。型は緩く扱う)。 */
-const mixedStream = [
+const mixedStream = invalidInput<ReadonlyArray<StoredIncremented>>([
   {
     type: "Added",
     data: { value: 3 },
@@ -57,7 +93,7 @@ const mixedStream = [
     version: 2,
     timestamp: "2026-01-01T00:00:01.000Z",
   },
-] as unknown as ReadonlyArray<StoredEvent<"Incremented", { amount: number }>>;
+]);
 
 describe("upcasting (AggregateConfig.upcast)", () => {
   it("旧スキーマイベントを upcast して rehydrate できる", () => {
@@ -71,15 +107,16 @@ describe("upcasting (AggregateConfig.upcast)", () => {
   });
 
   it("upcast はメタデータ (aggregateId/version) を保持し version 検証を通す", () => {
-    // version 検証は upcast 後に走るが、メタデータ保持により連番チェックは成功する
+    // version/aggregateId 検証は upcast 前の raw イベントに対して走る (DEC-020)。
+    // upcast がメタデータを保持する限り、変換後のイベントは evolve へ到達する
     const agg = rehydrate(configWithUpcast, "c1", mixedStream);
     expect(agg.id).toBe("c1");
   });
 
   it("executeCommand の load 経路にも upcast が効く", async () => {
     const store = new InMemoryEventStore<CounterEvents>();
-    // 旧スキーマイベントを直接 append（cast で legacy を注入）
-    await store.append("c1", [{ type: "Added", data: { value: 10 } }] as never, 0);
+    // 旧スキーマイベントを直接 append（legacy を型の外から注入）
+    await store.append("c1", invalidInput([{ type: "Added", data: { value: 10 } }]), 0);
 
     const result = await executeCommand({
       config: configWithUpcast,
@@ -94,5 +131,210 @@ describe("upcasting (AggregateConfig.upcast)", () => {
     // load → upcast(Added→Incremented=10) → state=10 → +5 → 15
     expect(result.aggregate.state).toBe(15);
     expect(result.aggregate.version).toBe(2);
+  });
+
+  it("raw イベントの aggregateId/version は upcast より先に検証される (DEC-020 の適用順序)", () => {
+    // aggregateId を「修正」してしまう buggy upcast。spec (§5.11) は
+    // 「version/aggregateId 検証の後、evolve/type 検証の前に適用」を固定しているため、
+    // 他 aggregate 混入は変換前に aggregateId_mismatch として検出されなければならない。
+    const rewritingUpcast: Upcaster<CounterEvents> = (raw) => ({
+      // わざと aggregateId を書き換える buggy upcast (出力の契約違反を検証する)
+      ...asIncremented(raw),
+      aggregateId: "c1",
+    });
+    const config: AggregateConfig<number, CounterEvents> = {
+      ...configNoUpcast,
+      upcast: rewritingUpcast,
+    };
+    const foreignStream: ReadonlyArray<StoredIncremented> = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "other-agg",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+
+    const err = (() => {
+      try {
+        rehydrate(config, "c1", foreignStream);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(assertInvalidStreamError(err).reason).toBe("aggregateId_mismatch");
+  });
+
+  it("version_gap は upcast の throw より先に報告される (raw 検証が先行)", () => {
+    // gap のある 2 件目でだけ throw する upcast。旧順序 (upcast 一括適用が先)
+    // なら "upcast exploded" が、現行順序 (raw 検証が先) なら version_gap が出る。
+    const throwingUpcast: Upcaster<CounterEvents> = (raw) => {
+      if (raw.version >= 3) throw new Error("upcast exploded");
+      return asIncremented(raw);
+    };
+    const config: AggregateConfig<number, CounterEvents> = {
+      ...configNoUpcast,
+      upcast: throwingUpcast,
+    };
+    const gapped: ReadonlyArray<StoredIncremented> = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        type: "Incremented",
+        data: { amount: 2 },
+        aggregateId: "c1",
+        version: 3, // gap (2 が欠落)
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ];
+
+    const err = (() => {
+      try {
+        rehydrate(config, "c1", gapped);
+      } catch (e) {
+        return e;
+      }
+    })();
+    // upcast が呼ばれる前に stream 破損を報告する
+    expect(assertInvalidStreamError(err).reason).toBe("version_gap");
+  });
+
+  it("Object.prototype 由来の type 名 (toString 等) は missing_evolve_handler で弾く", () => {
+    const prototypeNamed = invalidInput<ReadonlyArray<StoredIncremented>>([
+      {
+        type: "toString",
+        data: {},
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    // `in` 演算子は prototype chain を辿り "toString" を素通りさせてしまう。
+    // own-property 限定で missing_evolve_handler として fail-loud する。
+    const err = (() => {
+      try {
+        rehydrate(configNoUpcast, "c1", prototypeNamed);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(assertInvalidStreamError(err).reason).toBe("missing_evolve_handler");
+  });
+
+  it("stream の malformed 要素 (undefined / null / 非 object) は TypeError で fail-loud", () => {
+    for (const bad of [undefined, null, 42] as const) {
+      expect(() => rehydrate(configNoUpcast, "c1", invalidInput([bad]))).toThrow(TypeError);
+    }
+  });
+
+  it("upcast が不正な値を返したら TypeError (consumer の upcast バグを fail-loud)", () => {
+    const config: AggregateConfig<number, CounterEvents> = {
+      ...configNoUpcast,
+      upcast: invalidInput(() => undefined),
+    };
+    const valid: ReadonlyArray<StoredIncremented> = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    expect(() => rehydrate(config, "c1", valid)).toThrow(TypeError);
+  });
+
+  it("snapshot 経路の tail イベントにも upcast が効く (upcast × snapshot)", async () => {
+    const store = new InMemoryEventStore<CounterEvents>();
+    const snapshots = new InMemorySnapshotStore<number>();
+
+    // version 1: 現行 "Incremented"(10) を append
+    await store.append("c-snap", [{ type: "Incremented", data: { amount: 10 } }], 0);
+    // snapshot(version=1, state=10) を保存
+    await snapshots.save({
+      aggregateId: "c-snap",
+      version: 1,
+      state: 10,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    // version 2: 旧スキーマ "Added"({value:7}) を tail として append（cast で legacy を注入）
+    await store.append("c-snap", invalidInput([{ type: "Added", data: { value: 7 } }]), 1);
+
+    const result = await executeCommand({
+      config: configWithUpcast,
+      store,
+      handler: (_agg, input: { amount: number }) => [
+        { type: "Incremented", data: { amount: input.amount } },
+      ],
+      aggregateId: "c-snap",
+      input: { amount: 1 },
+      snapshotStore: snapshots,
+    });
+
+    // snapshot.state(10) を起点に loadFrom(v1) の tail = [Added(7)] を upcast→Incremented(7) で replay
+    // → 17、handler の +1 で 18。snapshot 短絡経路でも upcast 配線が保たれることを確認する。
+    expect(result.aggregate.state).toBe(18);
+    expect(result.aggregate.version).toBe(3);
+  });
+
+  it("upcast が replay 不可能な shape を返したら TypeError", () => {
+    // upcast 出力も evolve 可能な最小 shape (object + string type) を要求する。
+    // `data` 欠落は shape 違反ではない (v0.2.0 互換で `data: undefined` を受理)。
+    const stream: ReadonlyArray<StoredIncremented> = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    for (const returned of [
+      { aggregateId: "c1", version: 1 }, // type 欠落
+      { aggregateId: "c1", version: 1, type: 42 }, // 非 string type
+      null, // 非 object
+    ]) {
+      const config: AggregateConfig<number, CounterEvents> = {
+        ...configNoUpcast,
+        upcast: () => invalidInput(returned),
+      };
+      expect(() => rehydrate(config, "c1", stream)).toThrow(TypeError);
+    }
+  });
+
+  it("upcast が data 欠落の event を返しても `data: undefined` として evolve に流れる (v0.2.0 互換)", () => {
+    // data 属性を持たない legacy item (v0.2.0 が removeUndefinedValues で永続化した
+    // 形式) は `data: undefined` のまま evolve に渡る。evolve が data を dereference
+    // する場合はそこで TypeError になるため、data を使わない evolve で受理を確認する。
+    const stream: ReadonlyArray<StoredIncremented> = [
+      {
+        type: "Incremented",
+        data: { amount: 1 },
+        aggregateId: "c1",
+        version: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const seen: unknown[] = [];
+    const config: AggregateConfig<number, CounterEvents> = {
+      ...configNoUpcast,
+      upcast: () => invalidInput({ aggregateId: "c1", version: 1, type: "Incremented" }),
+      evolve: {
+        Incremented: (state, data) => {
+          seen.push(data);
+          return state;
+        },
+      },
+    };
+    const agg = rehydrate(config, "c1", stream);
+    expect(agg.version).toBe(1);
+    expect(seen).toEqual([undefined]);
   });
 });

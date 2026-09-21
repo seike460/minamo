@@ -3,10 +3,12 @@ import {
   DeleteTableCommand,
   DynamoDBClient,
   type DynamoDBClientConfig,
+  ResourceNotFoundException,
 } from "@aws-sdk/client-dynamodb";
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll } from "vitest";
 import { DynamoEventStore, DynamoSnapshotStore } from "../src/index.js";
 import { type CounterEvents, registerEventStoreContract } from "./contract/event-store.js";
+import { registerEventStoreValidationContract } from "./contract/event-store-validation.js";
 import {
   registerSnapshotStoreContract,
   type SnapshotTestState,
@@ -14,43 +16,31 @@ import {
 
 const TABLE_NAME = "minamo-contract-events";
 const SNAPSHOT_TABLE_NAME = "minamo-contract-snapshots";
-const ENDPOINT = "http://localhost:8000";
 
+// DynamoDB Local は credentials を検証しないため dummy 固定値でよい。
+// LocalStack 等 credentials が要る向き先では env で上書きする (setup.ts と同じ方針)。
 const CLIENT_CONFIG: DynamoDBClientConfig = {
-  region: "us-east-1",
-  endpoint: ENDPOINT,
-  credentials: { accessKeyId: "dummy", secretAccessKey: "dummy" },
+  region: process.env.AWS_REGION ?? "us-east-1",
+  endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://localhost:8000",
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "dummy",
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "dummy",
+  },
 };
 
-let control: DynamoDBClient;
-let available = false;
+let control: DynamoDBClient | undefined;
 
-async function pingDynamo(): Promise<boolean> {
-  const probe = new DynamoDBClient(CLIENT_CONFIG);
-  try {
-    // DeleteTable on a non-existent table is cheap and returns 400 quickly;
-    // the point is only to verify the endpoint is reachable.
-    await probe.send(new DeleteTableCommand({ TableName: "__minamo_ping__" }));
-    return true;
-  } catch (err) {
-    if ((err as Error).name === "ResourceNotFoundException") return true;
-    return false;
-  } finally {
-    probe.destroy();
-  }
-}
-
+// `test:integration` は backend 必須の明示コマンド。endpoint が到達不能なら
+// ここで throw して suite 全体を fail にする (contract を一件も実行せず
+// green になる経路は作らない)。
 beforeAll(async () => {
-  available = await pingDynamo();
-  if (!available) return;
-
   control = new DynamoDBClient(CLIENT_CONFIG);
 
   // 前回実行が afterAll に届かず table が残ったケースに備え、delete → create
   try {
     await control.send(new DeleteTableCommand({ TableName: TABLE_NAME }));
   } catch (err) {
-    if ((err as Error).name !== "ResourceNotFoundException") throw err;
+    if (!(err instanceof ResourceNotFoundException)) throw err;
   }
 
   await control.send(
@@ -72,7 +62,7 @@ beforeAll(async () => {
   try {
     await control.send(new DeleteTableCommand({ TableName: SNAPSHOT_TABLE_NAME }));
   } catch (err) {
-    if ((err as Error).name !== "ResourceNotFoundException") throw err;
+    if (!(err instanceof ResourceNotFoundException)) throw err;
   }
   await control.send(
     new CreateTableCommand({
@@ -85,21 +75,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!available) return;
+  if (control === undefined) return;
   await control.send(new DeleteTableCommand({ TableName: TABLE_NAME }));
   await control.send(new DeleteTableCommand({ TableName: SNAPSHOT_TABLE_NAME }));
   control.destroy();
 });
 
-describe("DynamoDB Local availability", () => {
-  it("is reachable at http://localhost:8000", (ctx) => {
-    if (!available) ctx.skip();
-    // the mere invocation of this test confirms beforeAll succeeded
-  });
-});
-
 /**
- * U4 Contract Tests (CT-01〜13) を DynamoEventStore 対象で実行。
+ * U4 Contract Tests (CT-01〜22) を DynamoEventStore 対象で実行。
  *
  * 同 aggregateId で append → concurrent write 衝突を避けるため、各 case の
  * `makeStore` は新しい (aggregateId 空間を共有する) store instance を返す。
@@ -117,9 +100,17 @@ registerEventStoreContract({
       clientConfig: CLIENT_CONFIG,
     }),
 });
+registerEventStoreValidationContract({
+  label: "DynamoEventStore (Local)",
+  makeStore: async () =>
+    new DynamoEventStore<CounterEvents>({
+      tableName: TABLE_NAME,
+      clientConfig: CLIENT_CONFIG,
+    }),
+});
 
 /**
- * CT-SS-01〜05 を DynamoSnapshotStore 対象で実行 (DEC-019)。
+ * CT-SS-01〜07 を DynamoSnapshotStore 対象で実行 (DEC-019)。
  * snapshot は単一 item/aggregate を上書きするため、各 case の aggregateId が衝突しなければ
  * store instance を共有しても干渉しない。
  */
