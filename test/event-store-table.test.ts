@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { EventStore } from "../src/index.js";
 import { createEventStoreTable, DynamoEventStore } from "../src/index.js";
+import { invalidInput } from "./invalid-input.js";
 
 /**
  * createEventStoreTable facade (concept.md §5.13, DEC-023)。
@@ -37,5 +38,21 @@ describe("createEventStoreTable", () => {
     expectTypeOf(inventory).toEqualTypeOf<DynamoEventStore<InventoryEvents>>();
     // EventStore<TMap> として扱える（契約一致）
     expectTypeOf(orders).toMatchTypeOf<EventStore<OrderEvents>>();
+  });
+
+  it("tableName が不正 → facade 生成時点で TypeError (.for() まで遅延させない)", () => {
+    for (const bad of [null, undefined, "", 42]) {
+      expect(() =>
+        createEventStoreTable(
+          invalidInput({
+            tableName: bad,
+            clientConfig: { region: "local" },
+          }),
+        ),
+      ).toThrow(TypeError);
+    }
+    // config 自体が null/undefined でも同じ TypeError に揃える
+    expect(() => createEventStoreTable(invalidInput(null))).toThrow(TypeError);
+    expect(() => createEventStoreTable(invalidInput(undefined))).toThrow(TypeError);
   });
 });

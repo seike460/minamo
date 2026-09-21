@@ -20,6 +20,8 @@ pnpm run test
 pnpm run build
 pnpm run check-exports      # attw + publint
 pnpm run check-api          # api-extractor: 公開 surface の差分検出
+pnpm run check-instanceof   # dist の error class invariant 検証 (build 後)
+pnpm run check-optional-peer # AWS SDK 無し隔離環境での import 検証 (build 後)
 ```
 
 公開 API を意図的に変更した場合は `pnpm run api-report` で `etc/minamo.api.md` を更新し、差分を commit する（CI の `check-api` が未レビューの surface drift で fail する。DEC-024）。
@@ -36,7 +38,7 @@ pnpm run test:integration
 1. Issue または discussion で合意
 2. feature branch を切り実装 (test-first を推奨、Contract Tests 対象の変更は InMemory/Dynamo 両方で green)
 3. `pnpm changeset` で changeset を追加 (`minor` / `patch` を選択)
-4. PR を開く。CI (lint / type-check / unit + coverage / build / attw + publint / api-extractor / typedoc / integration / CodeQL) が全て green であること
+4. PR を開く。CI (lint / type-check / unit + coverage / build / instanceof・optional-peer 検証 / attw + publint / api-extractor / typedoc / integration / CodeQL) が全て green であること
 5. review → merge 後、`changesets/action` が Release PR を自動生成
 
 ## Governance

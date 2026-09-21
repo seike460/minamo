@@ -14,12 +14,20 @@ import {
   DeleteTableCommand,
   DynamoDBClient,
   type DynamoDBClientConfig,
+  ResourceNotFoundException,
 } from "@aws-sdk/client-dynamodb";
 
+/**
+ * DynamoDB Local は credentials を検証しないため dummy 固定値でよい。
+ * 本番 AWS や LocalStack 等 credentials が要る向き先では env で上書きする。
+ */
 export const LOCAL_CLIENT_CONFIG: DynamoDBClientConfig = {
-  region: "us-east-1",
-  endpoint: "http://localhost:8000",
-  credentials: { accessKeyId: "dummy", secretAccessKey: "dummy" },
+  region: process.env.AWS_REGION ?? "us-east-1",
+  endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://localhost:8000",
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "dummy",
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "dummy",
+  },
 };
 
 export async function createEventTable(tableName: string): Promise<DynamoDBClient> {
@@ -28,7 +36,7 @@ export async function createEventTable(tableName: string): Promise<DynamoDBClien
   try {
     await client.send(new DeleteTableCommand({ TableName: tableName }));
   } catch (err) {
-    if ((err as Error).name !== "ResourceNotFoundException") throw err;
+    if (!(err instanceof ResourceNotFoundException)) throw err;
   }
   await client.send(
     new CreateTableCommand({

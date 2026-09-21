@@ -6,3 +6,6 @@ temp/
 *.tsbuildinfo
 .DS_Store
 .claude/
+*.tgz
+.env
+.env.*

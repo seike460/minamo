@@ -1,5 +1,6 @@
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { EventMap } from "../../core/types.js";
+import { assertTableName } from "../../internal/guards.js";
 import { type DynamoEventStoreConfig, resolveDocumentClient } from "./client.js";
 import { DynamoEventStore } from "./index.js";
 
@@ -12,6 +13,9 @@ export interface EventStoreTable {
    * 指定した `TMap` に narrow された `DynamoEventStore<TMap>` を返す。
    * heterogeneous union ではなく単一 Aggregate のストアを返すため、`rehydrate` が依存する
    * 単一ストリーム不変条件と per-Aggregate `TMap` narrowing が保たれる。
+   *
+   * 型引数は `table.for<OrderEvents>()` のように明示すること (省略時は widen されて
+   * narrow されない — v0.2.0 互換のため default `never` 化はしない)。
    */
   for<TMap extends EventMap>(): DynamoEventStore<TMap>;
 }
@@ -31,6 +35,9 @@ export interface EventStoreTable {
  * ```
  */
 export function createEventStoreTable(config: DynamoEventStoreConfig): EventStoreTable {
+  // `.for<TMap>()` 時点ではなく facade 生成時点で tableName を検証する
+  // (store の lazy 生成に設定ミスの検出を遅らせない)。
+  assertTableName(config?.tableName);
   const client: DynamoDBDocumentClient = resolveDocumentClient(config);
   const { tableName } = config;
   return {

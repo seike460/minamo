@@ -22,7 +22,7 @@ describe("EventsOf", () => {
   });
 
   it("extracts only string-keyed entries (symbol keys are dropped)", () => {
-    const sym: unique symbol = Symbol("x") as never;
+    const sym = Symbol("x"); // const 宣言の Symbol() は unique symbol と推論される
     type Map = { A: { x: 1 }; [sym]: { z: 3 } };
     // `[K in keyof TMap & string]` で symbol key は除外される
     type Result = EventsOf<Map>;

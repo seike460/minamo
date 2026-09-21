@@ -12,6 +12,7 @@ import {
   DeleteTableCommand,
   DynamoDBClient,
   type DynamoDBClientConfig,
+  ResourceNotFoundException,
 } from "@aws-sdk/client-dynamodb";
 import {
   type AggregateConfig,
@@ -37,10 +38,14 @@ const increment: CommandHandler<number, CounterEvents, { amount: number }> = (_a
 };
 
 const TABLE_NAME = "minamo-example-counter";
+// DynamoDB Local 向けの dummy credentials。LocalStack 等では env で上書きする。
 const CLIENT_CONFIG: DynamoDBClientConfig = {
-  region: "us-east-1",
-  endpoint: "http://localhost:8000",
-  credentials: { accessKeyId: "dummy", secretAccessKey: "dummy" },
+  region: process.env.AWS_REGION ?? "us-east-1",
+  endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://localhost:8000",
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "dummy",
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "dummy",
+  },
 };
 
 async function ensureTable(): Promise<DynamoDBClient> {
@@ -48,7 +53,7 @@ async function ensureTable(): Promise<DynamoDBClient> {
   try {
     await client.send(new DeleteTableCommand({ TableName: TABLE_NAME }));
   } catch (err) {
-    if ((err as Error).name !== "ResourceNotFoundException") throw err;
+    if (!(err instanceof ResourceNotFoundException)) throw err;
   }
   await client.send(
     new CreateTableCommand({

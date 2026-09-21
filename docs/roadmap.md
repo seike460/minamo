@@ -6,25 +6,25 @@
 
 The v0.1.x line keeps the contract published in [`docs/concept.md`](concept.md) §5 unchanged. Only bug fixes, documentation, and example additions land on v0.1.x.
 
-## v0.2.x — Under consideration
+## v0.2.x — Shipped in v0.2.0
 
-The items below surface in real projects using minamo (notably a 11-Aggregate service sharing one DynamoDB table). They are **not committed** — each still needs a design document, a DEC entry, and acceptance against the §4 "設計の姿勢" (thin, strict, framework-free).
+The two items previously queued here graduated to the public surface in **v0.2.0** as first-party helpers (`docs/concept.md` §5.13, DEC-023). Both are thin wrappers over the existing API and preserve the per-Aggregate `TMap` contract at the call site.
 
-### 1. Aggregate-spanning `EventStoreTable` facade
+### 1. Aggregate-spanning `EventStoreTable` facade — shipped
 
-**Motivation.** A shared DynamoDB table today requires one `EventStore<TMap>` instance per Aggregate type (11 in production use). The write side is already routed by `aggregateId`, so the duplication is pure boilerplate. A thin facade — e.g. `createEventStoreTable({ tableName, client }).for<CaseEvents>()` — would collapse the construction cost without relaxing the single-Aggregate `TMap` contract at the call site.
+`createEventStoreTable(config).for<TMap>()` shares one `DocumentClient` across Aggregates while narrowing each call to a single-Aggregate `DynamoEventStore<TMap>` (not a heterogeneous `EventStore<Union>`), so the single-stream invariant that `rehydrate` relies on is preserved (DEC-004 / DEC-009 / DEC-023). The narrowing is gated by `expectTypeOf` type tests (`test/event-store-table.test.ts`).
 
-**Risk.** The facade must not hide the per-Aggregate `TMap` narrowing (DEC-004 / DEC-009). If the facade returns a heterogeneous `EventStore<Union>` it loses the single-stream invariant that `rehydrate` relies on.
+### 2. First-party `createCommandRunner` utility — shipped
 
-**Status.** Exploratory. Needs a DEC and a concrete example before a v0.2 design doc.
+`createCommandRunner({ config, store, defaults })` fixes `config` / `store` and binds optional `defaults` (`maxRetries` / `observer` / `snapshotStore` / `snapshotPolicy`), collapsing the per-handler boilerplate. Call-site arguments override defaults (DEC-023). The [`examples/projected-event-store/command-runner.ts`](../examples/projected-event-store/command-runner.ts) recipe remains as the from-scratch illustration.
 
-### 2. First-party `createCommandRunner` utility
+## Under consideration
 
-**Motivation.** `executeCommand` uses object params on purpose — optional extensions (`maxRetries`, `correlationId`, future additions) should not be breaking. But consumers with many handlers per Aggregate repeat `config` / `store` / `handler` at every call site. The [`examples/projected-event-store/command-runner.ts`](../examples/projected-event-store/command-runner.ts) recipe is three lines, so the library does not need to ship it. Still, a first-party utility would normalize the pattern and make ts-doc discoverable.
+The item below is **not committed** — it still needs a design document, a DEC entry, and acceptance against the §4 "設計の姿勢" (thin, strict, framework-free).
 
-**Risk.** Promoting a utility to the public surface means owning its signature forever. The bar for crossing from recipe to core is "every non-trivial consumer writes it" — we need more than one reference project to justify that.
+### `defineAggregate` type helper
 
-**Status.** Deferred. Revisit after more public consumers exist.
+A type helper that infers `EventMap` from `evolve` to reduce the explicit type-parameter boilerplate (`docs/concept.md` §6 "API Ergonomics"). **Status.** Deferred — crossing from backlog to core expands the public surface and needs a DEC plus more than one reference consumer to justify owning the signature.
 
 ## Rejected (recorded to avoid re-litigation)
 
@@ -36,4 +36,4 @@ The items below surface in real projects using minamo (notably a 11-Aggregate se
 
 ---
 
-Last reviewed: 2026-05-30 (§7 alternatives re-verified: castore core/adapter both v2.4.2, @ocoda v3.0.0).
+Last reviewed: 2026-06-03 (v0.2.0 shipped — `EventStoreTable` facade + `createCommandRunner` moved from queue to "Shipped", DEC-023. §7 alternatives last re-verified 2026-05-30: castore core/adapter both v2.4.2, @ocoda v3.0.0).

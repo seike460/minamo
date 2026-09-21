@@ -1,4 +1,5 @@
 import { marshall } from "@aws-sdk/util-dynamodb";
+import { invalidInput } from "../invalid-input.js";
 
 /**
  * DynamoDB Streams の INSERT record を hand-craft するための minimal shape。
@@ -24,20 +25,20 @@ export function insertRecord(
 ): StreamRecordFixture {
   return {
     eventName: "INSERT",
-    dynamodb: { NewImage: marshall(item) as Record<string, unknown> },
+    dynamodb: { NewImage: marshall(item) },
   };
 }
 
 /** eventName が MODIFY の record (INSERT 以外 → null 挙動の検証用)。 */
 export const modifyRecord: StreamRecordFixture = {
   eventName: "MODIFY",
-  dynamodb: { NewImage: marshall({ aggregateId: "agg-1", version: 1 }) as Record<string, unknown> },
+  dynamodb: { NewImage: marshall({ aggregateId: "agg-1", version: 1 }) },
 };
 
 /** eventName が REMOVE の record。 */
 export const removeRecord: StreamRecordFixture = {
   eventName: "REMOVE",
-  dynamodb: { Keys: marshall({ aggregateId: "agg-1", version: 1 }) as Record<string, unknown> },
+  dynamodb: { Keys: marshall({ aggregateId: "agg-1", version: 1 }) },
 };
 
 /** NewImage が欠落している INSERT record。StreamViewType 設定ミスの再現。 */
@@ -54,5 +55,5 @@ export const insertWithoutNewImage: StreamRecordFixture = {
 export const insertWithCorruptNewImage: StreamRecordFixture = {
   eventName: "INSERT",
   // AttributeValue の descriptor ではなく生文字列を渡す → unmarshall 失敗
-  dynamodb: { NewImage: { aggregateId: "not-an-attribute-value" as unknown as never } },
+  dynamodb: { NewImage: { aggregateId: invalidInput("not-an-attribute-value") } },
 };

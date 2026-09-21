@@ -4,8 +4,8 @@
 
 ```ts
 
-import { DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 // @public
 export interface Aggregate<TState> {
@@ -200,6 +200,7 @@ export class InMemoryEventStore<TMap extends EventMap> implements EventStore<TMa
     clear(): void;
     // (undocumented)
     load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+    loadFrom(aggregateId: string, afterVersion: number): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 }
 
 // @public

@@ -165,8 +165,8 @@ minamo の設計判断に直結する Amazon DynamoDB、AWS Lambda、CQRS+ES パ
 | 制約 | 内容 | minamo への影響 |
 |------|------|----------------|
 | 結果整合性 | Command → Event → Projection は非同期。Read Model は即座に最新にならない | minamo のスコープ外。ドキュメントで注意喚起 |
-| イベントスキーマ進化 | 過去のイベントとの互換性維持が必要（upcasting） | v1 スコープ外。Non-Goals に明記 |
-| Aggregate イベント数増加 | Rehydration コストがイベント数に比例 | v1 は Snapshot なし。短いストリーム設計を推奨 |
+| イベントスキーマ進化 | 過去のイベントとの互換性維持が必要（upcasting） | `AggregateConfig.upcast` で対応（§5.11、DEC-020）。v0.2.0 で提供済み |
+| Aggregate イベント数増加 | Rehydration コストがイベント数に比例 | `SnapshotStore` で対応（§5.10、DEC-019）。v0.2.0 で提供済み |
 
 > **Fact:** CQRS+ES パターンでは、Read Model は Event Store からのイベント伝播により結果整合的に更新される。即座に最新にはならない。
 > Source: https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-data-persistence/cqrs-pattern.html (checked: 2026-04-12)
@@ -213,9 +213,9 @@ minamo は CQRS+ES の Write 側を構成する以下の要素を提供する。
 - Saga / Process Manager
 - CDK Construct
 - EventBridge Publisher
-- Snapshot
-- イベントスキーマ進化（upcasting）
 - 複数 DB 対応
+
+※ Snapshot とイベントスキーマ進化（upcasting）は当初 Non-Goals だったが、DEC-018 で v1 in-scope に昇格し v0.2.0 で提供済み（§5.10 / §5.11、§6 参照）。
 
 ### 設計の姿勢
 
@@ -860,6 +860,10 @@ export declare class DynamoEventStore<TMap extends EventMap> implements EventSto
     options?: AppendOptions,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
   load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+  loadFrom(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
 }
 
 /**
@@ -881,6 +885,10 @@ export declare class InMemoryEventStore<TMap extends EventMap> implements EventS
     options?: AppendOptions,
   ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
   load(aggregateId: string): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
+  loadFrom(
+    aggregateId: string,
+    afterVersion: number,
+  ): Promise<ReadonlyArray<StoredEventsOf<TMap>>>;
   /** 全ストリームの全イベントを取得（テスト用） */
   allEvents(): ReadonlyArray<StoredEventsOf<TMap>>;
   /** 全ストリームをクリア（テスト用） */
@@ -1057,6 +1065,12 @@ export declare class DynamoSnapshotStore<TState> implements SnapshotStore<TState
 }
 ```
 
+**異常時のセマンティクス（DEC-026）:** snapshot は rehydration の最適化層であり、異常時の扱いを失敗の性質で分ける。
+
+- **save 失敗は best-effort（command を妨げない）:** `executeCommand` の snapshot save は append 成功（= イベント commit 済み）の後に実行されるため、save 失敗で command 全体を reject すると、呼び出し側が再実行してイベントを二重に append する危険がある。したがって save 失敗は伝播させず握りつぶす。snapshot が無い／古いままでも状態の復元には影響しない（次回 rehydration は直近に成功した snapshot か full replay から復元する）。
+- **malformed load は throw（破損を隠さない）:** `DynamoSnapshotStore.load` は取得した item の envelope（`aggregateId` / `version` / `timestamp` の型と `state` の存在）を検証し、欠損・型違反があれば `TypeError` を throw する。`fromItem`（event）/ `parseStreamRecord`（stream）と同じ strict 方針で、table 破損を沈黙した rehydration 破綻に変えない。`state` の中身の shape は consumer schema 責務（`fromItem` の `data` と同様）。
+- **state shape の進化は consumer 責務:** upcasting（§5.11）はイベントスキーマの進化を扱うものであり、snapshot に保存された `state` の shape は対象外。`state` の shape を破壊的に変える場合、古い snapshot の無効化（別テーブル化や version 付け）は consumer が行う。
+
 ### 5.11 Upcasting（v0.2.0+ / DEC-020）
 
 永続化済みイベントは不変（immutable）であるため、スキーマ進化には過去イベントを現行スキーマへ変換する upcasting が必要になる。minamo は **consumer 所有の transform 関数**を `AggregateConfig.upcast` で受け取り、`rehydrate` が evolve 適用前に各イベントへ適用する。minamo 自身は upcaster エンジン（version 管理・連鎖変換）を持たない（thin / DEC-020）。
@@ -1198,7 +1212,7 @@ export declare function createEventStoreTable(
 Non-Goals ではなく、API の利便性改善として将来追加を検討するもの。
 
 - `defineAggregate` — EventMap を evolve から推論する型ヘルパー
-- `createCommandExecutor` — config + store をバインドするファクトリー
+- ~~`createCommandExecutor` — config + store をバインドするファクトリー~~ → v0.2.0 で `createCommandRunner` として出荷済み（§5.13 / DEC-023）
 
 ---
 
@@ -1291,6 +1305,7 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
   - DEC-010 で `input` に注入した値（時刻、UUID 等）も、イベントの `data` や Aggregate の `state` に含まれる時点でこの plain data 制約に従う
   - TypeScript の型レベルではこの制約を完全には強制できないが、`ReadonlyDeep<TState>` で immutability を示唆し、ドキュメントで plain data の制約を明示する
 - **棄却した代替案:** (a) `PlainData<T>` conditional type で Function / Symbol / Date 等を型レベルで排除する案 → 再帰型のコンパイル性能コストが高く、深いネストでの TypeScript の型推論が不安定になる (b) runtime validation（`assertPlainData` 関数）を `append` の境界で実行する案 → runtime オーバーヘッドが発生し、「DynamoDB API 呼び出し以外のオーバーヘッドを加えない」原則（セクション 4）に反する
+- **改訂（v0.2.0 品質修正）:** 代替案 (b) は後日採用された。実装レビューで InMemory の `structuredClone` と DynamoDB の marshall/unmarshall が同一入力に対し静かに食い違う経路（own `__proto__` key の消失、`Date`/`Map`/class instance の型崩れ、nested `undefined` の attr 喪失、循環参照での生 `DataCloneError`）が確認され、fail-loud な入力検証の方が「書けたが二度と読めない」stream poison より優先されると判断した。`assertPlainData` は event `data` / snapshot `state` に対し `append` / `save` 境界で再帰検証を行い、違反は `TypeError` で reject する。バイナリは `Uint8Array` 直生インスタンスのみ受理する（unmarshall が常に `Uint8Array` を返すため `Buffer`・`DataView`・`ArrayBuffer` は round-trip で型が変わる）。オーバーヘッドは payload 1 回の走査に留まり、DynamoDB のネットワーク呼び出しに対し誤差の範囲である
 
 > **Fact:** structured clone algorithm の仕様。
 > Source: https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal (checked: 2026-04-12)
@@ -1372,6 +1387,20 @@ Non-Goals ではなく、API の利便性改善として将来追加を検討す
 - **理由:** 機能群は相互依存して実装・検証済みであり、機能別の段階分割は stacked PR と API baseline の段階生成という運用コストを伴う。co-maintainer 不在（bus factor=1、§8）の現体制ではこの運用負荷が便益を上回る。§5.10〜5.13 の inline version 注記は既に `v0.2.0+` で整合しており、一括リリースは既存記述との齟齬が小さい
 - **棄却した代替案:** (a) roadmap 通り v0.2 / v0.3 / v0.4 に 3 分割 → roadmap には忠実だが、相互依存コードの分割リスクと 3 リリースサイクルの運用負荷が現体制では便益を上回る (b) 単一 v0.2.0 だが §12 を改訂しない → version↔feature 対応に齟齬が残り「3 マイナー安定」の解釈が宙に浮く
 
+### DEC-026: snapshot 最適化層の異常時セマンティクスを Hybrid（失敗の性質で使い分け）に確定する
+
+- **トリガー:** v0.2.0 出荷後の残存品質レビューで、(1) `executeCommand` の snapshot save が append 成功後に throw すると commit 済みなのに command 全体が reject され、呼び出し側の再実行が二重 append を招きうること、(2) `DynamoSnapshotStore.load` が取得 item を無検証で cast しており `version` 欠損等が `baseVersion + 1 = NaN` のような沈黙した rehydration 破綻になりうること、の 2 つの未規定箇所が判明した（§5.10 は異常時の挙動を規定していなかった）
+- **判断:** snapshot は optional な最適化層であり、異常時の扱いを失敗の性質で分ける。**save 失敗は best-effort で握りつぶし**（commit 済みを失敗にしない＝二重書き込み回避）、**malformed load は `TypeError` を throw する**（データ破損を隠さない＝`fromItem` / `parseStreamRecord` と同じ strict 方針）。いずれも public surface は変えない（新 hook / error class / config を追加せず、API Extractor gate で surface 不変を保証する）
+- **理由:** 2 つの失敗は性質が異なる。save 失敗は transient な infra 起因で、既に成立した write を覆すべきでない（最適化の失敗が正データの再実行を誘発するのは本末転倒）。一方 malformed item は consumer table の破損兆候であり、沈黙させると後続の rehydration が予測不能に壊れる。最適化層を一律 fail-loud / 一律 graceful にするより、失敗モードに整合した扱いの方が運用安全性が高い
+- **棄却した代替案:** (a) 全て fail-loud（save 失敗も throw）→ minamo の strict 姿勢には忠実だが、commit 済み command の reject で二重書き込み hazard が残る (b) 全て graceful（malformed load を null 扱いで full replay）→ 常に状態は復元できるが table 破損を恒久的に隠蔽し検知が遅れる (c) save 失敗を observer hook で通知 → 可観測性は上がるが `ExecuteObserver` への hook 追加は public surface 拡大であり、本リリースの非 API 拡大方針（残存品質の総点検）に反する。post-v1 候補として留保
+
+### DEC-027: AWS SDK optional peer は利用時点で lazy に解決する
+
+- **トリガー:** v0.2.0 出荷後の残存品質レビューで、`peerDependenciesMeta.optional` 宣言と実装が乖離していることが判明した。`@aws-sdk/*` が static import されていたため、InMemoryEventStore のみ使う consumer が AWS SDK を install していないと `import "@seike460/minamo"` 自体が `ERR_MODULE_NOT_FOUND` で失敗し、optional peer の意図（InMemory-only consumer に AWS SDK を強制しない）が機能していなかった
+- **判断:** AWS SDK への runtime 参照を全て lazy 化する。内部 helper（`createRequire` ベース）で利用時点に解決し、未 install の場合は「optional peer を install せよ」という package 名入りの明示的エラーにする。type 参照は `import type` のまま維持し、bundle から AWS SDK の静的参照を排除する。`scripts/verify-optional-peer.mjs` が AWS SDK なしの隔離環境で (a) import 成功 (b) InMemory 動作 (c) Dynamo 利用時の明示的エラー、を CI で検証する
+- **理由:** `createRequire` による lazy resolution は TypeORM / knex 等が optional dialect 依存に使う定石であり、public surface・単一 entry point を変えずに optional peer の契約を実現できる。export map の分割（`./dynamo` subpath 化）は public surface の breaking change を伴い、0.x 安定窓（DEC-024/025）の「既存 surface 非破壊」に反するため採らない
+- **棄却した代替案:** (a) `./dynamo` subpath export 化 → AWS SDK 利用者の import path が変わる breaking change。post-v1 で再検討の余地はある (b) peer を optional から外す → InMemory-only consumer に AWS SDK の install を強制し、「最小依存」の設計姿勢に反する (c) dynamic `import()` → bundler が chunk 分割し `dist` 構成が変わるリスクがあり、`createRequire` 同期解決の方が制御が単純
+
 ---
 
 ## 7. Alternatives
@@ -1392,8 +1421,8 @@ CQRS+ES を TypeScript で実現する既存の選択肢と minamo を比較す�
 | 楽観的ロック | ○ ConditionExpression | ○ | 利用者が実装 | ○ TransactWriteItems + ConditionCheck |
 | ConcurrencyError リトライ | △ Command 利用時に retry 設定あり | ✕ 利用者責任 | 利用者が実装 | ○ executeCommand で full-cycle retry を中核 API として提供 |
 | InMemory テスト互換 | △ 過去に差異報告あり（Issue #66） | — 未調査 | 利用者次第 | ○ Contract Tests で公開契約一致を保証 |
-| Snapshot | ✕ | ○ v3 系で提供 | 利用者が実装 | ✕（v1 非対応。将来検討） |
-| Event Upcasting | ✕ | ○ v3 系で提供 | 利用者が実装 | ✕（v1 非対応。将来検討） |
+| Snapshot | ✕ | ○ v3 系で提供 | 利用者が実装 | ○ SnapshotStore（§5.10、v0.2.0〜） |
+| Event Upcasting | ✕ | ○ v3 系で提供 | 利用者が実装 | ○ AggregateConfig.upcast（§5.11、v0.2.0〜） |
 | Read 側（Projection 管理） | △ 部分的 | ○ 包括的 | 利用者が実装 | ✕（Write 側のみ。parseStreamRecord で橋渡し） |
 | フレームワーク依存 | なし | NestJS 必須 | なし | なし |
 | runtime 依存数 | 2（@babel/runtime, ts-toolbelt） | 2+（class-transformer, ulidx） | 0 | AWS SDK v3 のみ |
@@ -1481,7 +1510,7 @@ minamo は「DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安�
 | Lambda + TypeScript か | ○ | 他言語 / 他ランタイム向けのライブラリを検討 |
 | CQRS+ES の Write 側の型安全性が必要か | ○ | 自前実装で十分な可能性。§1 の痛み A/B/C が該当しなければ minamo は過剰 |
 | NestJS を使っているか | No → minamo が適合 | Yes → @ocoda/event-sourcing が統合面で有利 |
-| Snapshot / Upcasting が v1 で必要か | No → minamo v1 で対応可能 | Yes → @ocoda（v2 系で提供）、または自前実装 |
+| Snapshot / Upcasting が必要か | ○（§5.10 / §5.11 で提供） | より包括的な管理機構が必要 → @ocoda、または自前実装 |
 | Read 側まで含めたフレームワークが必要か | No → minamo + AWS プリミティブ | Yes → @ocoda、または自前のフレームワーク構築 |
 | 実運用実績を重視するか | リスク受容可能 → minamo（v0.x） | 実績必須 → castore（Stars 274、既存利用者あり） |
 | SLA が必要か | No → minamo で対応可能 | Yes → 1 人メンテの OSS に SLA はない。§8 参照 |
@@ -1494,7 +1523,7 @@ minamo は「DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安�
 
 | リスク | 影響 | 発生条件 | 緩和策 | 関連 |
 |--------|------|---------|--------|------|
-| **Rehydration コスト増大** | Lambda 実行時間・メモリ消費が増加し、タイムアウト（15 分上限）に達するリスク | Aggregate のイベント数 × ペイロードサイズが増大した場合。安全運用レンジは未確定（v1 リリース後に実測で検証予定） | v1 は Snapshot なし。短いライフサイクルの Aggregate 設計を推奨する。ユースケースに応じた閾値の特定は §10 Open Questions | §3 Lambda 15分上限, §3 Query 1MB上限 |
+| **Rehydration コスト増大** | Lambda 実行時間・メモリ消費が増加し、タイムアウト（15 分上限）に達するリスク | Aggregate のイベント数 × ペイロードサイズが増大した場合。安全運用レンジは未確定（v1 リリース後に実測で検証予定） | `SnapshotStore` + `snapshotPolicy`（§5.10）で部分 replay に切り替えられる。それでも snapshot 以降の tail は線形に増えるため、短いライフサイクルの Aggregate 設計を依然推奨する。ユースケースに応じた閾値の特定は §10 Open Questions | §3 Lambda 15分上限, §3 Query 1MB上限, §5.10 |
 | **DynamoDB Streams 24h 保持期間超過** | Projection Lambda が 24 時間以上停止すると、未処理イベントが Stream から消失し、Read Model が不整合になる | Lambda のデプロイエラー、ESM の無効化、権限不備、throttling、長時間のインシデント | minamo のスコープ外だが、運用上の警告としてドキュメントに記載する。`IteratorAge` CloudWatch メトリクスによるアラーム設定で早期検知する。`MaximumRecordAgeInSeconds` と `MaximumRetryAttempts` は 24h 消失を直接防ぐものではないが、再試行を早く打ち切って OnFailure destination（SQS / SNS）に逃がすことで blast radius を縮小する補助策として推奨。全イベントは Event Store に残るため、Stream 消失時は Event Store から Read Model を再構築できるが、再構築機構（Runbook / バッチジョブ）は minamo が提供しない。利用者が実装する必要がある | §3 Streams 24h保持 |
 | **Hot aggregate による ConcurrencyError 増大と派生影響** | 同一 Aggregate への高頻度書き込みで即時リトライが競合を再同期させ、`maxRetries` を超過する確率が上がる。同一 PK への書き込み集中は DynamoDB の hot partition を引き起こし、`ProvisionedThroughputExceededException`（on-demand でも per-partition 上限）、Streams の iterator lag 増大、Lambda の reserved concurrency 競合にも波及する | 同一 Aggregate（= 同一 PK）への書き込みがパーティション容量（1,000 WCU / 3,000 RCU per partition）に対して高負荷になった場合 | Aggregate 境界の見直し（粒度を細かくして競合を分散）、上流での command serialization / rate limiting が根本対策。v1 は即時リトライに留め、backoff で隠さない設計判断（DEC-012）。`ConcurrencyError` 発生率と `IteratorAge` の監視を推奨。Projection Lambda の `Duration` / `Errors` / `Throttles` も監視対象に含めると派生影響の早期検知に有効 | §3 Lambda 同時実行, §3 トランザクション WCU, DEC-012 |
 | **TransactWriteItems のサイズ制約超過** | 1 コマンドで 99 件超のイベント、または合計 4MB / 単一 400KB を超えるイベントを append しようとすると `EventLimitError` | 大量のイベントを 1 コマンドで生成する設計、または大きな payload を持つイベント | `DynamoEventStore` が制約超過を `EventLimitError` として検出する。大きなデータは S3 参照パターン（S3 に格納し、イベントには S3 キーのみ含める）を推奨 | §3 TransactWriteItems上限, §3 アイテムサイズ上限 |
@@ -1507,7 +1536,7 @@ minamo は「DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安�
 | **トランザクション WCU 2x によるコスト・スロットリング** | TransactWriteItems は通常の 2 倍の WCU を消費する。on-demand でもバーストクレジットの消費が速くなり、per-partition limit に達するリスクがある | 高頻度の Command 実行。特に Aggregate あたりのイベント数が多い場合 | コスト試算時に WCU 2x を考慮する。on-demand テーブルでも per-partition 上限（1,000 WCU）は存在する。高スループットが必要な場合は Aggregate 粒度の調整で書き込みを分散する | §3 トランザクション WCU |
 | **イベントの不変性とデータ削除要求の衝突** | Event Sourcing ではイベントは不変（immutable）であり、後から削除・修正できない。PII（個人識別情報）をイベントに含めた場合、GDPR の「忘れられる権利」等の削除要求に対応が困難になる | PII をイベントの payload に直接格納した場合 | PII はイベントに直接含めず、外部ストア（暗号化された別テーブル等）への参照のみをイベントに格納する（crypto-shredding パターン）。minamo はこのパターンを強制しないが、ドキュメントで注意喚起する。暗号化・テナント分離・KMS 境界の設計は利用者の責務であり minamo のスコープ外 | — |
 | **Write 側の重複コマンド** | クライアントのタイムアウト再送や Lambda の再試行により、同一コマンドが複数回実行される可能性がある。`executeCommand` 内の ConcurrencyError リトライとは別の問題 | クライアント → API Gateway → Lambda の経路でタイムアウト後に再送が発生した場合 | `executeCommand` の呼び出し元で idempotency key（リクエスト ID 等）を管理する。Powertools for AWS Lambda の Idempotency ユーティリティが選択肢。minamo は Write 側の Command 冪等性を提供しない（Aggregate ライフサイクル内の ConcurrencyError リトライのみ）| — |
-| **Event schema evolution（イベントスキーマ進化）** | イベントにフィールドを追加・削除・型変更すると、Event Store に永続化済みの古いイベントを新しい `evolve` 関数が処理できず、Rehydration が失敗する。Event Store のイベントは不変であり、後から修正できない | Aggregate の `evolve` 定義を変更し、過去のイベント形態との互換性を維持しなかった場合 | v1 は upcaster 機構を提供しない（§6 将来検討）。**v1 ではイベントスキーマの変更は additive only に限定する（フィールド追加のみ OK。削除・リネーム・型変更は不可）。** 破壊的変更が必要な場合は新しい event type を追加し、古い type の evolve ハンドラも維持する。`evolve` 関数内での defensive coding（optional field、default value）が現実的な対策。将来の upcaster サポートは §10 Open Questions | §3 制約表（イベントスキーマ進化行）, §6 将来検討 |
+| **Event schema evolution（イベントスキーマ進化）** | イベントにフィールドを追加・削除・型変更すると、Event Store に永続化済みの古いイベントを新しい `evolve` 関数が処理できず、Rehydration が失敗する。Event Store のイベントは不変であり、後から修正できない | Aggregate の `evolve` 定義を変更し、過去のイベント形態との互換性を維持しなかった場合 | `AggregateConfig.upcast`（§5.11、v0.2.0〜）で旧スキーマを現行スキーマへ変換できる。ただし upcast transform の記述とメタデータ保持は consumer 責務。スキーマ変更を additive only（フィールド追加のみ）に限定すれば upcast 自体も不要になり、依然として最も低コストな対策。破壊的変更時は upcast を書くか、新しい event type を追加して古い type の evolve ハンドラを維持する | §3 制約表（イベントスキーマ進化行）, §5.11, DEC-020 |
 
 > **Assumption:** Rehydration コストが問題になる閾値は未確定。DynamoDB の Query レイテンシーは結果セットのサイズに依存し、Lambda の `timeout` と `memorySize` 設定によっても変動する。1,000 件のイベントが 1MB 以内に収まる場合は単一 Query で取得可能だが、固定の件数閾値ではなく、ユースケースごとの実測が必要。実測データに基づく閾値の特定は v1 リリース後の課題（§10 Open Questions）。
 
@@ -1539,12 +1568,12 @@ minamo は「DynamoDB + Lambda + TypeScript で CQRS+ES の Write 側を型安�
 
 | 条件 | 理由 |
 |------|------|
-| 長寿命 Aggregate（イベント数が継続的に増加し上限が予測できない） | v1 は Snapshot なし。Rehydration コストが Lambda のタイムアウト / メモリ上限に達するリスクが高い |
+| 長寿命 Aggregate（イベント数が継続的に増加し上限が予測できない） | `SnapshotStore`（§5.10）で rehydration コストは緩和できるが、snapshot 以降の tail は依然線形に増える。上限が予測できない設計そのものを見直すことを推奨 |
 | read-your-write 即時整合性が必須 | CQRS+ES は構造的に結果整合。Command 成功直後に最新の Read Model が必要なユースケースには不向き |
 | 独立した Projection Lambda が 3 つ以上必要 | DynamoDB Streams の同時読者制約（shard あたり 2）に抵触する。EventBridge Pipes 等の fan-out が必要になり、minamo のスコープ外の構成が前提になる |
 | Read Model の再構築基盤を自前で持てない | Streams 消失時の Read Model 再構築は minamo が提供しない。利用者が Runbook / バッチジョブを実装・運用する必要がある |
 | SLA が必要な本番ワークロード（ライブラリのバグ修正期限が contractual） | 1 人メンテの OSS に SLA は存在しない。fork の覚悟がない場合はリスクが高い |
-| 頻繁なイベントスキーマ変更が予見される | v1 は upcaster なし。`evolve` での defensive coding が前提であり、スキーマ変更頻度が高い場合は互換性維持の負荷が大きい |
+| 頻繁なイベントスキーマ変更が予見される | `AggregateConfig.upcast`（§5.11）は提供するが、transform の記述・検証は consumer 負務。変更頻度が高い場合は upcast 維持の負荷が大きい |
 
 ---
 
@@ -1556,7 +1585,7 @@ DynamoDB + Lambda + 結果整合性の基本理解がある開発者が、concep
 
 - [ ] Node.js 24+ および pnpm がインストール済み
 - [ ] AWS アカウントと DynamoDB テーブル作成権限（Step 2 以降で必要。Step 1 はローカルのみ）
-- [ ] TypeScript 5.0+ の開発環境（ESM: `"type": "module"` が前提。`tsconfig.json` は `"module": "NodeNext"`, `"moduleResolution": "NodeNext"` を推奨）
+- [ ] TypeScript 5.4+ の開発環境（`NoInfer` utility type が built-in 化された下限。ESM: `"type": "module"` が前提。`tsconfig.json` は `"module": "NodeNext"`, `"moduleResolution": "NodeNext"` を推奨）
 
 ### Step 1: InMemory でのローカル試行（5 分）
 
@@ -1674,17 +1703,24 @@ IAM 最小権限ポリシー例（Command Handler 用 Lambda）:
     {
       "Effect": "Allow",
       "Action": [
-        "dynamodb:GetItem",
         "dynamodb:Query",
         "dynamodb:TransactWriteItems"
       ],
       "Resource": "arn:aws:dynamodb:ap-northeast-1:ACCOUNT_ID:table/minamo-event-store"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:ACCOUNT_ID:table/minamo-snapshot-store"
     }
   ]
 }
 ```
 
-> **Fact:** 上記は minamo の `DynamoEventStore` が使用する IAM アクションの推定。実装確定後に正確な IAM ポリシー例を更新する。
+> **Fact:** `DynamoEventStore` は `Query`（load / loadFrom）と `TransactWriteItems`（append。内部の Put / ConditionCheck は TransactWriteItems の権限に含まれる）を使用する。`DynamoSnapshotStore` を併用する場合は snapshot テーブルへの `GetItem` / `PutItem` が追加で必要。snapshot を使わない場合は 2 番目の Statement は不要。
 > Source: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html (checked: 2026-04-12)
 
 **成功確認:** `executeCommand` が成功し、DynamoDB テーブルにイベントが永続化されること（`aws dynamodb query --table-name minamo-event-store --consistent-read --key-condition-expression "aggregateId = :id" --expression-attribute-values '{":id":{"S":"counter-1"}}'`）。
@@ -1715,7 +1751,7 @@ Event Source Mapping の推奨設定:
 試行後に以下を一読することを推奨する:
 
 - **§8 Risks** — 技術リスクと v1 採用非推奨条件を確認し、自身のユースケースで許容可能か判断する
-- **§6 Non-Goals** — minamo が提供しないもの（Read Model 管理、Saga、Snapshot 等）を理解する
+- **§6 Non-Goals** — minamo が提供しないもの（Read Model 管理、Saga、複数 DB 対応等）を理解する
 - **§11 Decisions** — 設計判断の背景を理解し、minamo の設計思想と自身のプロジェクトの方針が合致するか確認する
 
 ---
