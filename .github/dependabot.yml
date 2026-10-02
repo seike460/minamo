@@ -7,6 +7,11 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Tokyo
+    # .npmrc の minimum-release-age (10080 分 = 7 日) と揃える。
+    # 公開 7 日未満の版を提案すると pnpm が ERR_PNPM_NO_MATURE_MATCHING_VERSION で
+    # 拒否し、Dependabot ジョブが失敗する。
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - dependencies
