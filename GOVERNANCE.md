@@ -87,7 +87,7 @@ no-SLA, best-effort posture (§1) applies to maintainers too.
 Releases are automated and provenance-backed, which keeps the trusted surface small (see
 [`RELEASE.md`](RELEASE.md) and `docs/concept.md` DEC-016).
 
-- Pipeline: Changesets → `changesets/action@v1` opens a Release PR → merging it runs `release.yml`,
+- Pipeline: Changesets → `changesets/action@v2` opens a Release PR → merging it runs `release.yml`,
   which publishes to npm with **provenance** via **npm Trusted Publishing (OIDC)**, scoped to the
   `seike460/minamo` repository and the `release.yml` workflow.
 - Because publishing is tied to the repository's OIDC identity (not a personal token), release authority

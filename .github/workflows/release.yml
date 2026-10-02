@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           run_install: false
 
@@ -40,19 +40,19 @@ jobs:
 
       - name: Create Release Pull Request or Publish
         id: changesets
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
           # main に pending changeset があれば "Release PR" を自動生成。
-          # Release PR を merge 後は `publish: pnpm run release` が走り、build →
-          # `changeset publish` → `pnpm publish --provenance` で npm に公開する。
-          # Trusted Publishing (OIDC) が npm 側で登録済なら NPM_TOKEN は fallback。
-          version: pnpm run version-packages
-          publish: pnpm run release
-          commit: "chore(release): version packages"
-          title: "chore(release): version packages"
+          # Release PR を merge 後は `publish-script: pnpm run release` が走り、build →
+          # `changeset publish` で npm に公開する (provenance 付き)。
+          # 認証は npm Trusted Publishing (OIDC) のみ。v2 は NPM_TOKEN から .npmrc を作らない。
+          # GITHUB_TOKEN は action が script の env に渡す。env で別に設定すると
+          # `github-token` 入力との食い違いで失敗するため、ここでは設定しない。
+          version-script: pnpm run version-packages
+          publish-script: pnpm run release
+          commit-message: "chore(release): version packages"
+          pr-title: "chore(release): version packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
       - name: Verify npm provenance attestation (post-publish smoke)
