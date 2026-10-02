@@ -1,6 +1,6 @@
 # Release Playbook
 
-minamo の release pipeline は Changesets + `changesets/action@v1` + npm Trusted Publishing (OIDC) で構成される (DEC-016)。運用ドキュメント。
+minamo の release pipeline は Changesets + `changesets/action@v2` + npm Trusted Publishing (OIDC) で構成される (DEC-016)。運用ドキュメント。
 
 ## 通常 release の流れ
 
@@ -65,4 +65,4 @@ git restore --staged --worktree package.json .changeset/
 rm -f CHANGELOG.md
 ```
 
-`GITHUB_TOKEN` は `@changesets/changelog-github` が PR author / commit hash を解決するために必要。CI では `changesets/action@v1` が自動注入するためこの手順は不要。
+`GITHUB_TOKEN` は `@changesets/changelog-github` が PR author / commit hash を解決するために必要。CI では `changesets/action@v2` が自動注入するためこの手順は不要。
